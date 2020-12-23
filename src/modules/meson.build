@@ -53,6 +53,8 @@ all_modules = [
 #  [ 'module-solaris', 'module-solaris.c' ],
   [ 'module-stream-restore', 'module-stream-restore.c', [], [], [dbus_dep], libprotocol_native ],
   [ 'module-suspend-on-idle', 'module-suspend-on-idle.c' ],
+  [ 'module-iwab-sink', ['iwab/iwab-sink.c', 'iwab/net.c'], 'iwab/net.h'],
+  [ 'module-iwab-input', ['iwab/iwab-input.c', 'iwab/net.c'], 'iwab/net.h'],
   [ 'module-switch-on-connect', 'module-switch-on-connect.c' ],
   [ 'module-switch-on-port-available', 'module-switch-on-port-available.c' ],
   [ 'module-tunnel-sink', 'module-tunnel.c', [], ['-DTUNNEL_SINK=1'], [x11_dep] ],
