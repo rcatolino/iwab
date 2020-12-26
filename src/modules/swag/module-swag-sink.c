@@ -183,16 +183,24 @@ static void thread_func(void *userdata) {
             }
 
             pa_rtpoll_set_timer_relative(u->rtpoll, u->block_usec);
+            //pa_log("rtpoll set timer ok" );
         } else {
             pa_rtpoll_set_timer_disabled(u->rtpoll);
+            //pa_log("rtpoll set timer disabled ok");
         }
 
         /* Hmm, nothing to do. Let's sleep */
-        if ((ret = pa_rtpoll_run(u->rtpoll)) < 0)
+        if ((ret = pa_rtpoll_run(u->rtpoll)) < 0) {
+            pa_log("rtpoll fail : %d", ret);
             goto fail;
+        }
 
-        if (ret == 0)
+        //pa_log("rtpoll run ok");
+
+        if (ret == 0) {
+            pa_log("rtpoll 0, finishing thread: %d", ret);
             goto finish;
+        }
     }
 
 fail:
@@ -287,13 +295,16 @@ int pa__init(pa_module*m) {
 
     pa_sink_set_asyncmsgq(u->sink, u->thread_mq.inq);
     pa_sink_set_rtpoll(u->sink, u->rtpoll);
+    pa_log("Sink rtpoll set!");
 
     if (!(u->thread = pa_thread_new("swag-sink", thread_func, u))) {
         pa_log("Failed to create thread.");
         goto fail;
     }
 
+    pa_log("RT Thread created !");
     pa_sink_put(u->sink);
+    pa_log("Sink setup !");
     pa_modargs_free(ma);
     return 0;
 
