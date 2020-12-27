@@ -31,6 +31,7 @@
 #include <pulse/util.h>
 #include <pulse/xmalloc.h>
 
+#include <pulsecore/core-error.h>
 #include <pulsecore/i18n.h>
 #include <pulsecore/macro.h>
 #include <pulsecore/sink.h>
@@ -57,9 +58,9 @@ PA_MODULE_USAGE(
         "iface=<wireless interface>"
         );
 
-#define DEFAULT_SINK_NAME "swag"
-#define DEFAULT_IFACE "wlan0"
-#define MAX_FRAME_SIZE 1480
+#define DEFAULT_SINK_NAME "swsink"
+#define DEFAULT_IFACE "mon0"
+#define MAX_FRAME_SIZE 1400
 
 struct userdata {
     pa_core *core;
@@ -71,9 +72,7 @@ struct userdata {
     pa_rtpoll *rtpoll;
 
     pa_usec_t block_usec;
-    size_t buffer_size;
-    pa_usec_t processed_ts;
-    pa_memchunk memchunk;
+    pa_usec_t stream_ts_abs;
     const char *iface;
     int retries;
     struct wicast wistream;
@@ -100,11 +99,10 @@ static int sink_process_msg(
 
     switch (code) {
         case PA_SINK_MESSAGE_GET_LATENCY: { // We can do this lock free, we should override get_latency() instead
-            pa_usec_t now;
-
-            now = pa_rtclock_now();
-            *((int64_t*) data) = (int64_t)u->processed_ts - (int64_t)now;
-
+            pa_usec_t now = pa_rtclock_now();
+            pa_usec_t latency = u->stream_ts_abs - now;
+            *((int64_t*) data) = (int64_t) latency;
+            pa_log("Get latency : %ldus", latency);
             return 0;
         }
     }
@@ -121,7 +119,12 @@ static int sink_set_state_in_io_thread_cb(pa_sink *s, pa_sink_state_t new_state,
 
     if (s->thread_info.state == PA_SINK_SUSPENDED || s->thread_info.state == PA_SINK_INIT) {
         if (PA_SINK_IS_OPENED(new_state))
-            u->processed_ts = pa_rtclock_now();
+            pa_log("Sink is opened");
+            u->stream_ts_abs = pa_rtclock_now();
+    } else if (PA_SINK_IS_OPENED(s->thread_info.state)) {
+        if (new_state == PA_SINK_SUSPENDED) {
+            pa_log("Sink is suspended");
+        }
     }
 
     return 0;
@@ -135,14 +138,18 @@ static void sink_update_requested_latency_cb(pa_sink *s) {
     pa_assert_se(u = s->userdata);
 
     u->block_usec = pa_sink_get_requested_latency_within_thread(s);
+    pa_log("Update requested latency to %ld", u->block_usec); // TODO: this is wrong, block_usec is used to determine the frame size
 
-    if (u->block_usec == (pa_usec_t) -1)
-        u->block_usec = s->thread_info.max_latency;
+    if (u->block_usec == -1) {
+        nbytes = pa_frame_align(MAX_FRAME_SIZE, &u->sink->sample_spec);
+        u->block_usec = pa_bytes_to_usec(nbytes, &u->sink->sample_spec);
+        pa_log("Requested latency is invalid, using %lu instead", u->block_usec);
+    } else {
+        nbytes = pa_usec_to_bytes(u->block_usec, &u->sink->sample_spec);
+    }
 
-    nbytes = pa_usec_to_bytes(u->block_usec, &s->sample_spec);
-
+    pa_log("Corresponding buffer size : %lu", nbytes);
     pa_sink_set_max_rewind_within_thread(s, 0);
-
     pa_sink_set_max_request_within_thread(s, nbytes);
 }
 
@@ -152,41 +159,51 @@ static void thread_func(void *userdata) {
     pa_assert(u);
     pa_log_debug("Thread starting up");
 
-    /* is this really needed ?
-    if (u->core->realtime_scheduling)
-        pa_thread_make_realtime(u->core->realtime_priority);
-    */
-
     pa_thread_mq_install(&u->thread_mq);
-    u->processed_ts = pa_rtclock_now();
+    u->stream_ts_abs = pa_rtclock_now();
     u->retries = 0;
 
     for (;;) {
-        // Send audio stream in 1400 byte chunks (~one frame every 8ms at 44.1x16x2)
-        pa_usec_t now = pa_rtclock_now();
+        pa_usec_t now = 0;
         int ret;
 
-        // TODO: maybe deal with rewind
+        if (PA_SINK_IS_OPENED(u->sink->thread_info.state))
+            now = pa_rtclock_now();
+
+        if (PA_UNLIKELY(u->sink->thread_info.rewind_requested))
+            pa_sink_process_rewind(u->sink, 0);
 
         if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
-            if (u->processed_ts <= now) {
-                char * p;
+            if (u->stream_ts_abs < now + u->block_usec) {
                 pa_memchunk chunk;
-                pa_sink_render(u->sink, u->buffer_size, &chunk); // pa_sink_render_full always return a buffer_size length chunk
+                char * p;
+
+                pa_sink_render(u->sink, u->sink->thread_info.max_request, &chunk);
                 pa_assert(chunk.length > 0);
+
+                /*
+                if (u->stream_ts_abs > now + (u->block_usec/2)) {
+                    pa_log("stream_ts: %lu, now : %lu, small packet %luus, buffer size : %lu",
+                            u->stream_ts_abs, now, u->stream_ts_abs - now, chunk.length);
+                }
+                */
+
                 p = pa_memblock_acquire(chunk.memblock);
-                wicast_send(&u->wistream, (char*) p + chunk.index, chunk.length, u->processed_ts, 0);
+                ret = wicast_send(&u->wistream, (char*) p + chunk.index, chunk.length, u->stream_ts_abs, 0);
+                if (ret < 0) {
+                    pa_log("Error sending %zu byte buffer at %p", chunk.length, (char*) p + chunk.index);
+                    goto fail;
+                }
                 pa_memblock_release(chunk.memblock);
                 pa_memblock_unref(chunk.memblock);
-                u->processed_ts += pa_bytes_to_usec(chunk.length, &u->sink->sample_spec);
+                u->stream_ts_abs += pa_bytes_to_usec(chunk.length, &u->sink->sample_spec);
                 u->retries = 1;
             }
 
-            pa_rtpoll_set_timer_relative(u->rtpoll, u->block_usec);
-            //pa_log("rtpoll set timer ok" );
+            pa_rtpoll_set_timer_absolute(u->rtpoll, u->stream_ts_abs);
         } else {
             pa_rtpoll_set_timer_disabled(u->rtpoll);
-            //pa_log("rtpoll set timer disabled ok");
+            pa_log("rtpoll set timer disabled ok");
         }
 
         /* Hmm, nothing to do. Let's sleep */
@@ -219,7 +236,7 @@ int pa__init(pa_module*m) {
     pa_channel_map map;
     pa_modargs *ma = NULL;
     pa_sink_new_data data;
-    int ret;
+    size_t buffer_size = 0;
 
     pa_assert(m);
 
@@ -262,9 +279,8 @@ int pa__init(pa_module*m) {
     }
 
     u->iface = pa_modargs_get_value(ma, "iface", DEFAULT_IFACE);
-    ret = wicast_open(&u->wistream, u->iface);
-    if (ret < 0) {
-        pa_log("Failed to open interface %s, error : %d\n", u->iface, ret);
+    if (wicast_open(&u->wistream, u->iface)) {
+        pa_log("Failed to open interface %s, error : %s\n", u->iface, pa_cstrerror(errno));
         goto fail;
     }
 
@@ -277,16 +293,16 @@ int pa__init(pa_module*m) {
     }
 
     // We can send 1400 bytes frames max
-    u->buffer_size = pa_frame_align(MAX_FRAME_SIZE, &u->sink->sample_spec);
-    u->block_usec = pa_bytes_to_usec(u->buffer_size, &u->sink->sample_spec);
+    buffer_size = pa_frame_align(MAX_FRAME_SIZE, &u->sink->sample_spec);
+    u->block_usec = pa_bytes_to_usec(buffer_size, &u->sink->sample_spec);
     pa_log("Buffer size : %zd, corresponding timing : %luus at %s %uch %dHz",
-            u->buffer_size, u->block_usec,
+            buffer_size, u->block_usec,
             pa_sample_format_to_string(u->sink->sample_spec.format),
             u->sink->sample_spec.channels,
             u->sink->sample_spec.rate);
     pa_sink_set_latency_range(u->sink, 0, u->block_usec);
     pa_sink_set_max_rewind(u->sink, 0); // disable rewind on this sink
-    pa_sink_set_max_request(u->sink, u->buffer_size);
+    pa_sink_set_max_request(u->sink, buffer_size);
 
     u->sink->parent.process_msg = sink_process_msg;
     u->sink->set_state_in_io_thread = sink_set_state_in_io_thread_cb;
@@ -340,10 +356,6 @@ void pa__done(pa_module*m) {
     if (u->thread) {
         pa_asyncmsgq_send(u->thread_mq.inq, NULL, PA_MESSAGE_SHUTDOWN, NULL, 0, NULL);
         pa_thread_free(u->thread);
-    }
-
-    if (u->memchunk.memblock) {
-        pa_memblock_unref(u->memchunk.memblock);
     }
 
     pa_thread_mq_done(&u->thread_mq);
