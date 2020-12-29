@@ -58,7 +58,9 @@ struct ieee80211_head {
   uint8_t addr3[6];
   uint16_t frag_nb : 4;
   uint16_t seq_nb : 12;
-  uint16_t qos_control;
+}__attribute__((packed));
+
+struct l2_head {
   uint8_t src_mac[6];
   uint8_t dst_mac[6];
   uint16_t ethertype;
@@ -71,29 +73,38 @@ struct swag_head {
   uint32_t seq;
   uint64_t timestamp;
   uint8_t retry;
+  uint8_t pad[7];
+}__attribute__((packed));
+
+struct headers {
+  struct ieee80211_head dot11;
+  uint16_t dot11qos;
+  struct l2_head l2;
+  struct swag_head sw_h;
 }__attribute__((packed));
 
 struct wicast {
   int fd;
+  struct radiotap_head* rt_in;
+  struct ieee80211_head* dot11_in;
+  struct l2_head* l2_in;
+  struct swag_head* sw_in;
   union {
       struct radiotap rt_h;
       uint8_t rt_h_buff[sizeof(struct radiotap)];
   };
   union {
-      struct ieee80211_head wi_h;
-      uint8_t wi_h_buff[sizeof(struct ieee80211_head)];
-  };
-  union {
-      struct swag_head sw_h;
-      uint8_t sw_h_buff[sizeof(struct swag_head)];
+      struct headers wi_h;
+      uint8_t wi_h_buff[sizeof(struct headers)];
   };
   int head_length;
-  struct iovec iov[4]; //Fixed headers, body
+  struct iovec iov[3]; //Fixed headers, body
+  uint8_t addr_filter[6];
 };
 
 int wicast_open(struct wicast* wc, const char *iface);
 int wicast_close(struct wicast* wc);
 int wicast_send(struct wicast* wc, char* buffer, ssize_t length, uint64_t timestamp, uint8_t retried);
-ssize_t wicast_read(struct wicast* wc, char* buffer, ssize_t max_length);
+ssize_t wicast_read(struct wicast* wc, char* buffer, ssize_t max_length, size_t* data_offset);
 
 #endif

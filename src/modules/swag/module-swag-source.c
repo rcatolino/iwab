@@ -63,7 +63,7 @@ PA_MODULE_USAGE(
 
 #define DEFAULT_SOURCE_NAME "swsrc"
 #define DEFAULT_IFACE "mon0"
-#define MAX_FRAME_SIZE 1400
+#define MAX_FRAME_SIZE 1600
 
 struct userdata {
     pa_core *core;
@@ -124,6 +124,7 @@ static void thread_func(void *userdata) {
     pa_assert(u);
     pa_log_debug("Thread starting up");
     pa_thread_mq_install(&u->thread_mq);
+    uint32_t last_seq = 0;
 
     for (;;) {
         int ret;
@@ -139,26 +140,56 @@ static void thread_func(void *userdata) {
             // Re-alloc memblock if it doesn't exist ? TODO: Why is this needed ?
             if (!u->memchunk.memblock) {
                 u->memchunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
-                u->memchunk.index = u->memchunk.length = 0;
             }
 
+            u->memchunk.index = u->memchunk.length = 0;
             pa_assert(pa_memblock_get_length(u->memchunk.memblock) > u->memchunk.index);
 
             p = pa_memblock_acquire(u->memchunk.memblock);
-            l = wicast_read(&u->wistream, (char*) p + u->memchunk.index, pa_memblock_get_length(u->memchunk.memblock));
+            l = wicast_read(&u->wistream, (char*) p, pa_memblock_get_length(u->memchunk.memblock),
+                    &u->memchunk.index);
             pa_memblock_release(u->memchunk.memblock);
-
             pa_assert(l != 0); /* EOF cannot happen, since we opened the fifo for both reading and writing */
-
-            if (l < 0) {
+            if (l < 100) {
+                if (l == -4) {
+                    pa_log("invalid dot11, type %u, subtype %u, rt offset : %zu",
+                            u->wistream.dot11_in->type,
+                            u->wistream.dot11_in->subtype,
+                            u->memchunk.index);
+                }
+                if (errno == EAGAIN || errno == EINTR) {
+                    continue;
+                }
                 pa_log("Failed to read wireless data : %s", pa_cstrerror(errno));
                 goto fail;
             }
 
+            /*
+            pa_log("sw seq %u, sw ts %lu, sw len : %u, len : %lu, data offset : %lu",
+                    u->wistream.sw_in->seq,
+                    u->wistream.sw_in->timestamp,
+                    u->wistream.sw_in->length,
+                    l, u->memchunk.index);
+            */
             u->memchunk.length = (size_t) l;
-            pa_source_post(u->source, &u->memchunk);
-            pa_memchunk_reset(&u->memchunk);
+            if (!pa_frame_aligned(l, &u->source->sample_spec)) {
+                pa_log("error, unaligned frame. l : %ld, swag seq : %u, swag length : %u", l,
+                        u->wistream.sw_in->seq,
+                        u->wistream.sw_in->length);
+                continue;
+            }
 
+            if (u->wistream.sw_in->seq != (last_seq + 1)) {
+                pa_log("last_seq : %u, sw seq %u, sw ts %lu, sw len : %u, len : %lu, data offset : %lu",
+                        last_seq,
+                        u->wistream.sw_in->seq,
+                        u->wistream.sw_in->timestamp,
+                        u->wistream.sw_in->length,
+                        l, u->memchunk.index);
+            }
+
+            last_seq = u->wistream.sw_in->seq;
+            pa_source_post(u->source, &u->memchunk);
             pollfd->revents = 0;
         }
 

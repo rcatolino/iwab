@@ -10,29 +10,71 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
+#include <pulsecore/log.h>
+
 #include "net.h"
 
-ssize_t wicast_read(struct wicast* wc, char* buffer, ssize_t max_length) {
+ssize_t wicast_read(struct wicast* wc, char* buffer, ssize_t max_length, size_t* data_offset) {
   ssize_t read_size;
+  *data_offset = 0;
   if (!buffer) {
     errno = EINVAL;
     return -1;
   }
 
-  wc->iov[3].iov_base = buffer;
-  wc->iov[3].iov_len = max_length - wc->head_length;
-  int iovcnt = sizeof(wc->iov) / sizeof(struct iovec);
-  read_size = readv(wc->fd, wc->iov, iovcnt);
+  read_size = recv(wc->fd, buffer, max_length, 0);
   if (read_size < 0) {
     return read_size;
   }
 
-  if (read_size <= wc->head_length) {
-    errno = EINTR; // TODO: mb there is a more fitting error code.
+  if (read_size <= sizeof(struct radiotap)) {
+    errno = EAGAIN; // this is too small to be a wiscast packet
     return -2;
   }
 
-  return read_size - wc->head_length;
+  wc->rt_in = (struct radiotap_head*) (buffer + *data_offset); // i guess this is violating strict aliasing rules, but buffer content should be constant
+  *data_offset += wc->rt_in->length;
+  if ((read_size - *data_offset) <= sizeof(struct ieee80211_head)) {
+    errno = EAGAIN; // this is too small to be a wiscast packet
+    return -3;
+  }
+
+  wc->dot11_in = (struct ieee80211_head*) (buffer + *data_offset);
+  *data_offset += sizeof(struct ieee80211_head) + sizeof(uint16_t); // skip qos field as well
+  if ((read_size - *data_offset) <= sizeof(struct l2_head) || wc->dot11_in->type != 2 || wc->dot11_in->subtype != 8) {
+    errno = EAGAIN; // too small or wrong type
+    return -4;
+  }
+
+  if (memcmp(wc->wi_h.dot11.addr1, wc->addr_filter, sizeof(wc->addr_filter)) != 0 ||
+      memcmp(wc->wi_h.dot11.addr2, wc->addr_filter, sizeof(wc->addr_filter)) != 0 ||
+      memcmp(wc->wi_h.dot11.addr3, wc->addr_filter, sizeof(wc->addr_filter)) != 0) {
+    pa_log("w1: %02x:%02x:%02x:%02x:%02x:%02x",
+        wc->wi_h.dot11.addr1[0], wc->wi_h.dot11.addr1[1], wc->wi_h.dot11.addr1[2],
+        wc->wi_h.dot11.addr1[3], wc->wi_h.dot11.addr1[4], wc->wi_h.dot11.addr1[5]);
+    errno = EAGAIN; // this is not a wicast packet
+    return -5;
+  }
+
+  wc->l2_in = (struct l2_head*) (buffer + *data_offset);
+  *data_offset += sizeof(struct l2_head);
+  if (read_size - *data_offset <= sizeof(struct swag_head)) {
+    errno = EAGAIN;
+    return -6;
+  }
+
+  wc->sw_in = (struct swag_head*) (buffer + *data_offset);
+  *data_offset += sizeof(struct swag_head);
+  if (read_size - *data_offset <= 4) {
+    errno = EAGAIN;
+    return -7;
+  }
+
+  return read_size - (*data_offset + 4); // 4 is for the FCS
 }
 
 int wicast_send(struct wicast* wc, char* buffer, ssize_t length, uint64_t timestamp, uint8_t retried) {
@@ -41,12 +83,12 @@ int wicast_send(struct wicast* wc, char* buffer, ssize_t length, uint64_t timest
     return -1;
   }
 
-  wc->sw_h.length = length;
-  wc->sw_h.seq += 1;
-  wc->sw_h.timestamp = timestamp;
-  wc->sw_h.retry = retried;
-  wc->iov[3].iov_base = buffer;
-  wc->iov[3].iov_len = length;
+  wc->wi_h.sw_h.length = length;
+  wc->wi_h.sw_h.seq += 1;
+  wc->wi_h.sw_h.timestamp = timestamp;
+  wc->wi_h.sw_h.retry = retried;
+  wc->iov[2].iov_base = buffer;
+  wc->iov[2].iov_len = length;
   int iovcnt = sizeof(wc->iov) / sizeof(struct iovec);
   return writev(wc->fd, wc->iov, iovcnt);
 }
@@ -64,42 +106,37 @@ static void wicast_setup(struct wicast* wc) {
   wc->rt_h.args[4] = 0x1; // MCS INDEX (QPSK 1/2)
   //wc->rt_args[4] = 0x3; // MCS INDEX (16-QAM 1/2)
 
-  wc->wi_h.version = 0;
-  wc->wi_h.type = 2; // data frame
-  wc->wi_h.subtype = 8; // qos frame
-  wc->wi_h.flags = 0;
-  wc->wi_h.duration = 0;
-  memset(wc->wi_h.addr1, 0, sizeof(wc->wi_h.addr1));
-  memset(wc->wi_h.addr2, 0, sizeof(wc->wi_h.addr2));
-  memset(wc->wi_h.addr3, 0, sizeof(wc->wi_h.addr3));
-  wc->wi_h.frag_nb = 0;
-  wc->wi_h.seq_nb = 0;
-  wc->wi_h.qos_control = 0;
-  memset(wc->wi_h.src_mac, 0, sizeof(wc->wi_h.src_mac));
-  memset(wc->wi_h.dst_mac, 0, sizeof(wc->wi_h.dst_mac));
-  wc->wi_h.ethertype = 0x8454;
+  wc->wi_h.dot11.version = 0;
+  wc->wi_h.dot11.type = 2; // data frame
+  wc->wi_h.dot11.subtype = 8; // qos frame
+  wc->wi_h.dot11.flags = 0;
+  wc->wi_h.dot11.duration = 0;
+  memset(wc->wi_h.dot11.addr1, 0, sizeof(wc->wi_h.dot11.addr1));
+  memset(wc->wi_h.dot11.addr2, 0, sizeof(wc->wi_h.dot11.addr2));
+  memset(wc->wi_h.dot11.addr3, 0, sizeof(wc->wi_h.dot11.addr3));
+  wc->wi_h.dot11.frag_nb = 0;
+  wc->wi_h.dot11.seq_nb = 0;
+  wc->wi_h.dot11qos= 0;
+  memset(wc->wi_h.l2.src_mac, 0, sizeof(wc->wi_h.l2.src_mac));
+  memset(wc->wi_h.l2.dst_mac, 0, sizeof(wc->wi_h.l2.dst_mac));
+  wc->wi_h.l2.ethertype = 0x8454;
 
   // Swag header
-  wc->sw_h.version = 0;
-  wc->sw_h.channel = 0;
-  wc->sw_h.length = 0; // set channel size here for each packet
-  wc->sw_h.seq = 0; // increment by one for each new packet
-  wc->sw_h.timestamp = 0;
-  wc->sw_h.retry = 0; // set if it's a retry
+  wc->wi_h.sw_h.version = 0;
+  wc->wi_h.sw_h.channel = 0;
+  wc->wi_h.sw_h.length = 0; // set channel size here for each packet
+  wc->wi_h.sw_h.seq = 0; // increment by one for each new packet
+  wc->wi_h.sw_h.timestamp = 0;
+  wc->wi_h.sw_h.retry = 0; // set if it's a retry
 
   // Setup iovec
   wc->iov[0].iov_base = wc->rt_h_buff;
   wc->iov[0].iov_len = wc->rt_h.head.length;
   wc->iov[1].iov_base = wc->wi_h_buff;
   wc->iov[1].iov_len = sizeof(wc->wi_h_buff);
-  wc->iov[2].iov_base = wc->sw_h_buff;
-  wc->iov[2].iov_len = sizeof(wc->sw_h_buff);
-  // iov[3] must be filled for each send
-  wc->head_length = wc->iov[0].iov_len;
-  wc->head_length += wc->iov[1].iov_len;
-  wc->head_length += wc->iov[2].iov_len;
-  wc->iov[3].iov_base = NULL;
-  wc->iov[3].iov_len = 0;
+  // iov[2] must be filled for each send
+  wc->iov[2].iov_base = NULL;
+  wc->iov[2].iov_len = 0;
 }
 
 int wicast_close(struct wicast* wc) {
@@ -117,7 +154,8 @@ int wicast_open(struct wicast* wc, const char* iface) {
     return -1;
   }
 
-  int fd = socket(AF_PACKET, SOCK_RAW, htobe16(ETH_P_ALL));
+  //int fd = socket(AF_PACKET, SOCK_RAW, htobe16(ETH_P_ALL));
+  int fd = socket(AF_PACKET, SOCK_DGRAM, htobe16(ETH_P_ALL));
   if (fd < 0) {
     printf("Error oppening raw socket : %s\n", strerror(errno));
     return -2;
