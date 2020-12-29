@@ -33,6 +33,7 @@
 #include <sys/filio.h>
 #endif
 
+#include <pulse/rtclock.h>
 #include <pulse/xmalloc.h>
 
 #include <pulsecore/core-error.h>
@@ -77,7 +78,6 @@ struct userdata {
     char *filename;
     int fd;
 
-    pa_usec_t block_usec;
     pa_usec_t stream_ts_abs;
     pa_usec_t stream_ts_start;
     const char *iface;
@@ -109,8 +109,7 @@ static int source_process_msg(
     switch (code) {
 
         case PA_SOURCE_MESSAGE_GET_LATENCY: {
-            size_t n = 0;
-            *((int64_t*) data) = pa_bytes_to_usec(n, &u->source->sample_spec);
+            *((int64_t*) data) = pa_bytes_to_usec(MAX_FRAME_SIZE, &u->source->sample_spec);
             return 0;
         }
     }
@@ -125,6 +124,9 @@ static void thread_func(void *userdata) {
     pa_log_debug("Thread starting up");
     pa_thread_mq_install(&u->thread_mq);
     uint32_t last_seq = 0;
+    pa_usec_t last_ts = 0;
+    pa_usec_t offset = 0;
+    pa_usec_t pb_ts = pa_rtclock_now() - (pa_bytes_to_usec(MAX_FRAME_SIZE, &u->source->sample_spec)/2);
 
     for (;;) {
         int ret;
@@ -188,9 +190,28 @@ static void thread_func(void *userdata) {
                         l, u->memchunk.index);
             }
 
+            if (last_seq == 0) {
+                offset = 0;
+            } else {
+                offset = u->wistream.sw_in->timestamp - last_ts;
+            }
+
+            //pa_log("to play in %luus, now %lu, timeout %lu", offset, pa_rtclock_now(), pb_ts + offset);
+            last_ts = u->wistream.sw_in->timestamp;
             last_seq = u->wistream.sw_in->seq;
-            pa_source_post(u->source, &u->memchunk);
             pollfd->revents = 0;
+            pb_ts += offset;
+            pa_rtpoll_set_timer_absolute(u->rtpoll, pb_ts);
+        } else if (u->source->thread_info.state == PA_SOURCE_RUNNING && pollfd->revents == 0) {
+            if (u->memchunk.length != 0) {
+                pa_rtpoll_set_timer_disabled(u->rtpoll);
+                pa_source_post(u->source, &u->memchunk);
+                pa_memblock_unref(u->memchunk.memblock);
+                pa_memchunk_reset(&u->memchunk);
+            } else {
+                pa_log("warning, playing at %luus, empty buffer : %lu, last_seq : %u",
+                        pb_ts, u->memchunk.length, last_seq);
+            }
         }
 
         /* Hmm, nothing to do. Let's sleep */
@@ -289,7 +310,7 @@ int pa__init(pa_module *m) {
 
     pa_source_set_asyncmsgq(u->source, u->thread_mq.inq);
     pa_source_set_rtpoll(u->source, u->rtpoll);
-    pa_source_set_fixed_latency(u->source, pa_bytes_to_usec(pa_pipe_buf(u->fd), &u->source->sample_spec));
+    pa_source_set_fixed_latency(u->source, pa_bytes_to_usec(MAX_FRAME_SIZE, &u->source->sample_spec));
 
     u->rtpoll_item = pa_rtpoll_item_new(u->rtpoll, PA_RTPOLL_NEVER, 1);
     pollfd = pa_rtpoll_item_get_pollfd(u->rtpoll_item, NULL);
