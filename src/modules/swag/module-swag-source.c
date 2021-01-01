@@ -58,8 +58,8 @@ PA_MODULE_USAGE(
         "format=<sample format> "
         "rate=<sample rate> "
         "channels=<number of channels> "
-        "channel_map=<channel map>"
-        "iface=<wireless interface>"
+        "channel_map=<channel map> "
+        "iface=<wireless interface> "
         );
 
 #define DEFAULT_SOURCE_NAME "swsrc"
@@ -78,8 +78,7 @@ struct userdata {
     char *filename;
     int fd;
 
-    pa_usec_t stream_ts_abs;
-    pa_usec_t stream_ts_start;
+    pa_usec_t next_pb_ts;
     const char *iface;
     int retries;
     pa_memchunk memchunk;
@@ -126,11 +125,16 @@ static void thread_func(void *userdata) {
     uint32_t last_seq = 0;
     pa_usec_t last_ts = 0;
     pa_usec_t offset = 0;
-    pa_usec_t pb_ts = pa_rtclock_now() - (pa_bytes_to_usec(MAX_FRAME_SIZE, &u->source->sample_spec)/2);
+    u->next_pb_ts = 0;
+    pa_usec_t max_delay = pa_bytes_to_usec(MAX_FRAME_SIZE, &u->source->sample_spec);
 
     for (;;) {
         int ret;
         struct pollfd *pollfd;
+        pa_usec_t now = pa_rtclock_now();
+        if (now < (u->next_pb_ts + max_delay) || u->next_pb_ts > (now + max_delay)) {
+            u->next_pb_ts = now + (3*max_delay)/4;
+        }
 
         pollfd = pa_rtpoll_item_get_pollfd(u->rtpoll_item, NULL);
 
@@ -138,6 +142,7 @@ static void thread_func(void *userdata) {
         if (u->source->thread_info.state == PA_SOURCE_RUNNING && pollfd->revents) {
             ssize_t l;
             void *p;
+            pollfd->revents = 0;
 
             // Re-alloc memblock if it doesn't exist ? TODO: Why is this needed ?
             if (!u->memchunk.memblock) {
@@ -181,7 +186,11 @@ static void thread_func(void *userdata) {
                 continue;
             }
 
-            if (u->wistream.sw_in->seq != (last_seq + 1)) {
+            if (u->wistream.sw_in->seq == last_seq) {
+                // this is a retry, and we already got the last one : ignore.
+                pa_log("@%lu, got a retry, ignoring", now);
+                continue;
+            } else if (u->wistream.sw_in->seq != (last_seq + 1)) {
                 pa_log("last_seq : %u, sw seq %u, sw ts %lu, sw len : %u, len : %lu, data offset : %lu",
                         last_seq,
                         u->wistream.sw_in->seq,
@@ -191,7 +200,7 @@ static void thread_func(void *userdata) {
             }
 
             if (last_seq == 0) {
-                offset = 0;
+                offset = (3*max_delay)/4;
             } else {
                 offset = u->wistream.sw_in->timestamp - last_ts;
             }
@@ -199,18 +208,37 @@ static void thread_func(void *userdata) {
             //pa_log("to play in %luus, now %lu, timeout %lu", offset, pa_rtclock_now(), pb_ts + offset);
             last_ts = u->wistream.sw_in->timestamp;
             last_seq = u->wistream.sw_in->seq;
-            pollfd->revents = 0;
-            pb_ts += offset;
-            pa_rtpoll_set_timer_absolute(u->rtpoll, pb_ts);
+            //u->next_pb_ts += offset;
+            pa_usec_t plen = pa_bytes_to_usec(l, &u->source->sample_spec);
+            pa_log("@%lu, got a new audio packet, %luus long, next pb ts %lu, delay : %lu",
+                    now, plen, u->next_pb_ts, u->next_pb_ts - now);
+            if (now + max_delay/2 > u->next_pb_ts) {
+                pa_log("@%lu, warning, we just got an audio packet but pb time %lu is very soon !",
+                        now, u->next_pb_ts);
+            }
+            pa_rtpoll_set_timer_absolute(u->rtpoll, u->next_pb_ts);
         } else if (u->source->thread_info.state == PA_SOURCE_RUNNING && pollfd->revents == 0) {
-            if (u->memchunk.length != 0) {
+            if (now >= u->next_pb_ts) {
+                pa_log("@%lu time to play, next pb ts : %lu", now, u->next_pb_ts);
+                // playback time
+                if (u->memchunk.length != 0) {
+                    pa_source_post(u->source, &u->memchunk);
+                    u->next_pb_ts += pa_bytes_to_usec(u->memchunk.length, &u->source->sample_spec);
+                    pa_memblock_unref(u->memchunk.memblock);
+                    pa_memchunk_reset(&u->memchunk);
+                } else {
+                    pa_log("warning, empty buffer : %lu, last_seq : %u",
+                            u->memchunk.length, last_seq);
+                    u->next_pb_ts += max_delay;
+                }
+
+                // set next wakeup time provisionally, this should be update by the next
+                // network packet before timer runs out.
+                // u->next_pb_ts += max_delay;
                 pa_rtpoll_set_timer_disabled(u->rtpoll);
-                pa_source_post(u->source, &u->memchunk);
-                pa_memblock_unref(u->memchunk.memblock);
-                pa_memchunk_reset(&u->memchunk);
             } else {
-                pa_log("warning, playing at %luus, empty buffer : %lu, last_seq : %u",
-                        pb_ts, u->memchunk.length, last_seq);
+                pa_log("@%lu not time to play yet, next pb ts : %lu", now, u->next_pb_ts);
+                pa_rtpoll_set_timer_absolute(u->rtpoll, u->next_pb_ts);
             }
         }
 

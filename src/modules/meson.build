@@ -54,7 +54,7 @@ all_modules = [
   [ 'module-stream-restore', 'module-stream-restore.c', [], [], [dbus_dep], libprotocol_native ],
   [ 'module-suspend-on-idle', 'module-suspend-on-idle.c' ],
   [ 'module-swag-sink', ['swag/module-swag-sink.c', 'swag/net.c'], 'swag/net.h'],
-  [ 'module-swag-source', ['swag/module-swag-source.c', 'swag/net.c'], 'swag/net.h'],
+  [ 'module-swag-input', ['swag/module-swag-input.c', 'swag/net.c'], 'swag/net.h'],
   [ 'module-switch-on-connect', 'module-switch-on-connect.c' ],
   [ 'module-switch-on-port-available', 'module-switch-on-port-available.c' ],
   [ 'module-tunnel-sink', 'module-tunnel.c', [], ['-DTUNNEL_SINK=1'], [x11_dep] ],

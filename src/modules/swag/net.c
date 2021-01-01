@@ -176,6 +176,11 @@ int wicast_open(struct wicast* wc, const char* iface) {
     return -4;
   }
 
+  int max_rcv_size = 1600;
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &max_rcv_size, sizeof(int)) < 0) {
+    printf("Error setting receive buffer size : %s\n", strerror(errno));
+  }
+
   wicast_setup(wc);
   wc->fd = fd;
   return 0;
