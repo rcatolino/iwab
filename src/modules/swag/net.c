@@ -57,9 +57,11 @@ ssize_t wicast_read(struct wicast* wc, char* buffer, ssize_t max_length, size_t*
   if (memcmp(dot11_in->addr1, wc->addr_filter, sizeof(wc->addr_filter)) != 0 ||
       memcmp(dot11_in->addr2, wc->addr_filter, sizeof(wc->addr_filter)) != 0 ||
       memcmp(dot11_in->addr3, wc->addr_filter, sizeof(wc->addr_filter)) != 0) {
+    /*
     pa_log("w1: %02x:%02x:%02x:%02x:%02x:%02x",
         dot11_in->addr1[0], dot11_in->addr1[1], dot11_in->addr1[2],
         dot11_in->addr1[3], dot11_in->addr1[4], dot11_in->addr1[5]);
+    */
     errno = EAGAIN; // this is not a wicast packet
     return -5;
   }

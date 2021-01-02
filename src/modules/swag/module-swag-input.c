@@ -65,10 +65,11 @@ struct userdata {
     pa_sink_input *sink_input;
     const char *iface;
     pa_memblockq *queue;
+    pa_memchunk last_chunk;
     bool first_packet;
-    pa_usec_t offset;
     pa_rtpoll_item *rtpoll_item;
     uint32_t seqnb;
+    pa_usec_t last_pb_ts;
     struct wicast wistream;
     int retries;
     pa_sample_spec ss;
@@ -113,10 +114,6 @@ static int sink_input_pop_cb(pa_sink_input *i, size_t length, pa_memchunk *chunk
         return -1;
     }
 
-    /*
-    pa_log("new packet requested, queue size : %u packets, sending %zu bytes",
-            pa_memblockq_get_nblocks(u->queue), chunk->length);
-    */
     pa_memblockq_drop(u->queue, chunk->length);
     return 0;
 }
@@ -169,12 +166,14 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         pa_memblock_release(newchunk.memblock);
 
         if (l < 0) {
+            /*
             if (l == -4) {
                 pa_log("invalid dot11, type %u, subtype %u, rt offset : %zu",
                         u->wistream.dot11_in->type,
                         u->wistream.dot11_in->subtype,
                         newchunk.index);
             }
+            */
 
             if (errno == EINTR) {
                 // retry;
@@ -199,23 +198,29 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         goto ignore;
     }
 
+    if (u->seqnb != 0 && u->wistream.sw_in->seq != (u->seqnb + 1)) {
+        pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u. \
+                Missing %luus of playback, duplicating this chunk of length %luus",
+                u->seqnb, u->wistream.sw_in->seq,
+                u->wistream.sw_in->timestamp - u->last_pb_ts,
+                pa_bytes_to_usec(newchunk.length, &u->ss));
+
+        // ideally we would modify the size to fit the missing chunk, but they should be close enough
+        // also, if we are missing more than one chunk we should duplicate this one accordingly
+        pa_memblockq_push(u->queue, newchunk);
+    }
+
     if (pa_memblockq_push(u->queue, &newchunk) < 0) {
         pa_log("Buffer overrun, new packet received but audio queue is full (%u packets)",
                 pa_memblockq_get_nblocks(u->queue));
-        // pa_memblockq_seek(u->queue, (int64_t) chunk.length, PA_SEEK_RELATIVE, true); // TODO: why ?
+        //pa_memblockq_seek(u->queue, (int64_t) newchunk.length, PA_SEEK_RELATIVE, true); // TODO: why ?
     } else {
         //pa_log("new packet received queue size : %u packets", pa_memblockq_get_nblocks(u->queue));
     }
 
-    pa_memblock_unref(newchunk.memblock);
-
-    if (u->seqnb == 0) {
-        u->offset = u->wistream.sw_in->timestamp;
-    } else if (u->wistream.sw_in->seq != (u->seqnb + 1)) {
-        pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u", u->seqnb, u->wistream.sw_in->seq);
-    }
-
     u->seqnb = u->wistream.sw_in->seq;
+    u->last_pb_ts = u->wistream.sw_in->timestamp + pa_bytes_to_usec(newchunk.length, &u->ss);
+    pa_memblock_unref(u->last_chunk.memblock);
 
     return 1;
 
@@ -276,7 +281,6 @@ int pa__init(pa_module*m) {
     u->module = m;
     u->core = m->core;
     u->seqnb = 0;
-    u->offset = 0;
     u->rtpoll_item = NULL;
     // TODO: get actual sample spec from sender
     u->ss.format = PA_SAMPLE_S16LE;
