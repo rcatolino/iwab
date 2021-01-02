@@ -69,7 +69,7 @@ struct userdata {
     pa_rtpoll_item *rtpoll_item;
     uint32_t seqnb;
     pa_usec_t last_pb_ts;
-    struct iwab wistream;
+    struct iwab istream;
     int retries;
     pa_sample_spec ss;
 	pa_usec_t lost_pb;
@@ -161,7 +161,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     newchunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
     for (;;) {
         p = pa_memblock_acquire(newchunk.memblock);
-        l = iwab_read(&u->wistream, (char*) p, pa_memblock_get_length(newchunk.memblock),
+        l = iwab_read(&u->istream, (char*) p, pa_memblock_get_length(newchunk.memblock),
                 &newchunk.index);
         pa_memblock_release(newchunk.memblock);
 
@@ -169,8 +169,8 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
             /*
             if (l == -4) {
                 pa_log("invalid dot11, type %u, subtype %u, rt offset : %zu",
-                        u->wistream.dot11_in->type,
-                        u->wistream.dot11_in->subtype,
+                        u->istream.dot11_in->type,
+                        u->istream.dot11_in->subtype,
                         newchunk.index);
             }
             */
@@ -193,30 +193,30 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         break;
     }
 
-    if (u->wistream.iw_in->seq == u->seqnb) {
+    if (u->istream.iw_in->seq == u->seqnb) {
         // this is a repeat packet
         goto ignore;
     }
 
 	pa_assert(pa_frame_aligned(newchunk.length, &u->ss));
-	if (u->seqnb != 0 && u->wistream.iw_in->seq < u->seqnb) {
+	if (u->seqnb != 0 && u->istream.iw_in->seq < u->seqnb) {
 		pa_log("Packet disordered. Previous seq : %u, last seq : %u, rewind : %u",
-			u->seqnb, u->wistream.iw_in->seq, u->seqnb - u->wistream.iw_in->seq);
+			u->seqnb, u->istream.iw_in->seq, u->seqnb - u->istream.iw_in->seq);
 		goto ignore;
 	}
 
-	if (u->last_pb_ts != 0 && u->wistream.iw_in->timestamp < u->last_pb_ts) {
+	if (u->last_pb_ts != 0 && u->istream.iw_in->timestamp < u->last_pb_ts) {
 		pa_log("Timestamps disordered. Previous ts : %lu, last ts : %lu, rewind : %lu",
-			u->last_pb_ts, u->wistream.iw_in->timestamp,
-			u->last_pb_ts - u->wistream.iw_in->timestamp);
+			u->last_pb_ts, u->istream.iw_in->timestamp,
+			u->last_pb_ts - u->istream.iw_in->timestamp);
         goto ignore;
 	}
 
-    if (u->seqnb != 0 && u->wistream.iw_in->seq != (u->seqnb + 1)) {
-		u->lost_pb += u->wistream.iw_in->timestamp - u->last_pb_ts;
+    if (u->seqnb != 0 && u->istream.iw_in->seq != (u->seqnb + 1)) {
+		u->lost_pb += u->istream.iw_in->timestamp - u->last_pb_ts;
 		pa_proplist_setf(u->sink_input->proplist, "iwab.lost", "%lums lost", u->lost_pb / 1000);
-		pa_assert(u->wistream.iw_in->timestamp > u->last_pb_ts);
-		pa_usec_t missing = pa_usec_to_bytes(u->wistream.iw_in->timestamp - u->last_pb_ts, &u->ss);
+		pa_assert(u->istream.iw_in->timestamp > u->last_pb_ts);
+		pa_usec_t missing = pa_usec_to_bytes(u->istream.iw_in->timestamp - u->last_pb_ts, &u->ss);
 		pa_memchunk filler = newchunk;
 		while (missing > 0) {
 			if (newchunk.length > missing) {
@@ -228,7 +228,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
 			/*
 			pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u. \
 					Missing %luus of playback, duplicating this chunk of length %luus",
-                u->seqnb, u->wistream.iw_in->seq,
+                u->seqnb, u->istream.iw_in->seq,
 				pa_bytes_to_usec(missing, &u->ss),
                 pa_bytes_to_usec(filler.length, &u->ss));
 			*/
@@ -245,8 +245,8 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         //pa_log("new packet received queue size : %u packets", pa_memblockq_get_nblocks(u->queue));
     }
 
-    u->seqnb = u->wistream.iw_in->seq;
-    u->last_pb_ts = u->wistream.iw_in->timestamp + pa_bytes_to_usec(newchunk.length, &u->ss);
+    u->seqnb = u->istream.iw_in->seq;
+    u->last_pb_ts = u->istream.iw_in->timestamp + pa_bytes_to_usec(newchunk.length, &u->ss);
     pa_memblock_unref(newchunk.memblock);
 
     return 1;
@@ -272,7 +272,7 @@ static void sink_input_attach(pa_sink_input *i) {
 
     u->rtpoll_item = pa_rtpoll_item_new(i->sink->thread_info.rtpoll, PA_RTPOLL_LATE, 1);
     p = pa_rtpoll_item_get_pollfd(u->rtpoll_item, NULL);
-    p->fd = u->wistream.fd;
+    p->fd = u->istream.fd;
     p->events = POLLIN;
     p->revents = 0;
 
@@ -319,14 +319,14 @@ int pa__init(pa_module*m) {
         goto fail;
     }
 
-    // open wistream
+    // open istream
     u->iface = pa_modargs_get_value(ma, "iface", DEFAULT_IFACE);
-    if (iwab_open(&u->wistream, u->iface)) {
+    if (iwab_open(&u->istream, u->iface)) {
         pa_log("Failed to open interface %s, error : %s\n", u->iface, pa_cstrerror(errno));
         goto fail;
     }
 
-    pa_make_fd_nonblock(u->wistream.fd);
+    pa_make_fd_nonblock(u->istream.fd);
 
     // setup sink input
     if (!(sink = pa_namereg_get(u->module->core,
@@ -383,8 +383,8 @@ fail:
         pa_modargs_free(ma);
     }
 
-    if (u->wistream.fd) {
-        pa_assert_se(iwab_close(&u->wistream) == 0);
+    if (u->istream.fd) {
+        pa_assert_se(iwab_close(&u->istream) == 0);
     }
 
     if (u) {
@@ -406,8 +406,8 @@ void pa__done(pa_module*m) {
         pa_memblockq_free(u->queue);
     }
 
-    if (u->wistream.fd) {
-        pa_assert_se(iwab_close(&u->wistream) == 0);
+    if (u->istream.fd) {
+        pa_assert_se(iwab_close(&u->istream) == 0);
     }
 
     pa_xfree(u);
