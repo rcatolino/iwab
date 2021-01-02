@@ -46,7 +46,7 @@
 #include "net.h"
 
 PA_MODULE_AUTHOR("rca");
-PA_MODULE_DESCRIPTION(_("swag sink"));
+PA_MODULE_DESCRIPTION(_("iwab sink"));
 PA_MODULE_VERSION(PACKAGE_VERSION);
 PA_MODULE_LOAD_ONCE(false);
 PA_MODULE_USAGE(
@@ -58,7 +58,7 @@ PA_MODULE_USAGE(
         "iface=<wireless interface>"
         );
 
-#define DEFAULT_SINK_NAME "swsink"
+#define DEFAULT_SINK_NAME "iwabsink"
 #define DEFAULT_IFACE "mon0"
 #define MAX_FRAME_SIZE 1400
 
@@ -75,7 +75,7 @@ struct userdata {
     pa_usec_t stream_ts_abs;
     const char *iface;
     int retries;
-    struct wicast wistream;
+    struct iwab wistream;
 };
 
 static const char* const valid_modargs[] = {
@@ -189,7 +189,7 @@ static void thread_func(void *userdata) {
                 */
 
                 p = pa_memblock_acquire(chunk.memblock);
-                ret = wicast_send(&u->wistream, (char*) p + chunk.index, chunk.length, u->stream_ts_abs, 0);
+                ret = iwab_send(&u->wistream, (char*) p + chunk.index, chunk.length, u->stream_ts_abs, 0);
                 if (ret < 0) {
                     pa_log("Error sending %zu byte buffer at %p", chunk.length, (char*) p + chunk.index);
                     goto fail;
@@ -279,7 +279,7 @@ int pa__init(pa_module*m) {
     }
 
     u->iface = pa_modargs_get_value(ma, "iface", DEFAULT_IFACE);
-    if (wicast_open(&u->wistream, u->iface)) {
+    if (iwab_open(&u->wistream, u->iface)) {
         pa_log("Failed to open interface %s, error : %s\n", u->iface, pa_cstrerror(errno));
         goto fail;
     }
@@ -313,7 +313,7 @@ int pa__init(pa_module*m) {
     pa_sink_set_rtpoll(u->sink, u->rtpoll);
     pa_log("Sink rtpoll set!");
 
-    if (!(u->thread = pa_thread_new("swag-sink", thread_func, u))) {
+    if (!(u->thread = pa_thread_new("iwab-sink", thread_func, u))) {
         pa_log("Failed to create thread.");
         goto fail;
     }
@@ -366,7 +366,7 @@ void pa__done(pa_module*m) {
     if (u->rtpoll)
         pa_rtpoll_free(u->rtpoll);
 
-    pa_assert_se(wicast_close(&u->wistream) == 0);
+    pa_assert_se(iwab_close(&u->wistream) == 0);
 
     pa_xfree(u);
 }

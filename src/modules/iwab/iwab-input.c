@@ -45,7 +45,7 @@ PA_MODULE_USAGE(
         "iface=<wireless interface> "
 );
 
-#define DEFAULT_SOURCE_NAME "swsrc"
+#define DEFAULT_SOURCE_NAME "iwabsrc"
 #define DEFAULT_IFACE "mon0"
 #define MAX_FRAME_SIZE 1600
 
@@ -65,12 +65,11 @@ struct userdata {
     pa_sink_input *sink_input;
     const char *iface;
     pa_memblockq *queue;
-    pa_memchunk last_chunk;
     bool first_packet;
     pa_rtpoll_item *rtpoll_item;
     uint32_t seqnb;
     pa_usec_t last_pb_ts;
-    struct wicast wistream;
+    struct iwab wistream;
     int retries;
     pa_sample_spec ss;
 };
@@ -161,7 +160,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     newchunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
     for (;;) {
         p = pa_memblock_acquire(newchunk.memblock);
-        l = wicast_read(&u->wistream, (char*) p, pa_memblock_get_length(newchunk.memblock),
+        l = iwab_read(&u->wistream, (char*) p, pa_memblock_get_length(newchunk.memblock),
                 &newchunk.index);
         pa_memblock_release(newchunk.memblock);
 
@@ -193,21 +192,21 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         break;
     }
 
-    if (u->wistream.sw_in->seq == u->seqnb) {
+    if (u->wistream.iw_in->seq == u->seqnb) {
         // this is a repeat packet
         goto ignore;
     }
 
-    if (u->seqnb != 0 && u->wistream.sw_in->seq != (u->seqnb + 1)) {
+    if (u->seqnb != 0 && u->wistream.iw_in->seq != (u->seqnb + 1)) {
         pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u. \
                 Missing %luus of playback, duplicating this chunk of length %luus",
-                u->seqnb, u->wistream.sw_in->seq,
-                u->wistream.sw_in->timestamp - u->last_pb_ts,
+                u->seqnb, u->wistream.iw_in->seq,
+                u->wistream.iw_in->timestamp - u->last_pb_ts,
                 pa_bytes_to_usec(newchunk.length, &u->ss));
 
         // ideally we would modify the size to fit the missing chunk, but they should be close enough
         // also, if we are missing more than one chunk we should duplicate this one accordingly
-        pa_memblockq_push(u->queue, newchunk);
+        pa_memblockq_push(u->queue, &newchunk);
     }
 
     if (pa_memblockq_push(u->queue, &newchunk) < 0) {
@@ -218,9 +217,9 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         //pa_log("new packet received queue size : %u packets", pa_memblockq_get_nblocks(u->queue));
     }
 
-    u->seqnb = u->wistream.sw_in->seq;
-    u->last_pb_ts = u->wistream.sw_in->timestamp + pa_bytes_to_usec(newchunk.length, &u->ss);
-    pa_memblock_unref(u->last_chunk.memblock);
+    u->seqnb = u->wistream.iw_in->seq;
+    u->last_pb_ts = u->wistream.iw_in->timestamp + pa_bytes_to_usec(newchunk.length, &u->ss);
+    pa_memblock_unref(newchunk.memblock);
 
     return 1;
 
@@ -293,7 +292,7 @@ int pa__init(pa_module*m) {
 
     // open wistream
     u->iface = pa_modargs_get_value(ma, "iface", DEFAULT_IFACE);
-    if (wicast_open(&u->wistream, u->iface)) {
+    if (iwab_open(&u->wistream, u->iface)) {
         pa_log("Failed to open interface %s, error : %s\n", u->iface, pa_cstrerror(errno));
         goto fail;
     }
@@ -334,7 +333,7 @@ int pa__init(pa_module*m) {
     // setup audio buffer
     pa_sink_input_get_silence(u->sink_input, &silence);
     u->queue = pa_memblockq_new(
-            "module-swag-input memblockq",
+            "module-iwab-input memblockq",
             0,
             10*MAX_FRAME_SIZE,
             5*MAX_FRAME_SIZE,
@@ -355,7 +354,7 @@ fail:
     }
 
     if (u->wistream.fd) {
-        pa_assert_se(wicast_close(&u->wistream) == 0);
+        pa_assert_se(iwab_close(&u->wistream) == 0);
     }
 
     if (u) {
@@ -378,7 +377,7 @@ void pa__done(pa_module*m) {
     }
 
     if (u->wistream.fd) {
-        pa_assert_se(wicast_close(&u->wistream) == 0);
+        pa_assert_se(iwab_close(&u->wistream) == 0);
     }
 
     pa_xfree(u);

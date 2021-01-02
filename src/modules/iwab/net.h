@@ -66,7 +66,7 @@ struct l2_head {
   uint16_t ethertype;
 }__attribute__((packed));
 
-struct swag_head {
+struct iwab_head {
   uint8_t version;
   uint8_t channel;
   uint16_t length;
@@ -80,15 +80,15 @@ struct headers {
   struct ieee80211_head dot11;
   uint16_t dot11qos;
   struct l2_head l2;
-  struct swag_head sw_h;
+  struct iwab_head iw_h;
 }__attribute__((packed));
 
-struct wicast {
+struct iwab {
   int fd;
   struct radiotap_head* rt_in;
   struct ieee80211_head* dot11_in;
   struct l2_head* l2_in;
-  struct swag_head* sw_in;
+  struct iwab_head* iw_in;
   union {
       struct radiotap rt_h;
       uint8_t rt_h_buff[sizeof(struct radiotap)];
@@ -102,9 +102,9 @@ struct wicast {
   uint8_t addr_filter[6];
 };
 
-int wicast_open(struct wicast* wc, const char *iface);
-int wicast_close(struct wicast* wc);
-int wicast_send(struct wicast* wc, char* buffer, ssize_t length, uint64_t timestamp, uint8_t retried);
-ssize_t wicast_read(struct wicast* wc, char* buffer, ssize_t max_length, size_t* data_offset);
+int iwab_open(struct iwab* iw, const char *iface);
+int iwab_close(struct iwab* iw);
+int iwab_send(struct iwab* iw, char* buffer, ssize_t length, uint64_t timestamp, uint8_t retried);
+ssize_t iwab_read(struct iwab* iw, char* buffer, ssize_t max_length, size_t* data_offset);
 
 #endif
