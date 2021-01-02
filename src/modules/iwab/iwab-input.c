@@ -72,6 +72,7 @@ struct userdata {
     struct iwab wistream;
     int retries;
     pa_sample_spec ss;
+	pa_usec_t lost_pb;
 };
 
 /* Called from I/O thread context */
@@ -197,16 +198,43 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         goto ignore;
     }
 
-    if (u->seqnb != 0 && u->wistream.iw_in->seq != (u->seqnb + 1)) {
-        pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u. \
-                Missing %luus of playback, duplicating this chunk of length %luus",
-                u->seqnb, u->wistream.iw_in->seq,
-                u->wistream.iw_in->timestamp - u->last_pb_ts,
-                pa_bytes_to_usec(newchunk.length, &u->ss));
+	pa_assert(pa_frame_aligned(newchunk.length, &u->ss));
+	if (u->seqnb != 0 && u->wistream.iw_in->seq < u->seqnb) {
+		pa_log("Packet disordered. Previous seq : %u, last seq : %u, rewind : %u",
+			u->seqnb, u->wistream.iw_in->seq, u->seqnb - u->wistream.iw_in->seq);
+		goto ignore;
+	}
 
-        // ideally we would modify the size to fit the missing chunk, but they should be close enough
-        // also, if we are missing more than one chunk we should duplicate this one accordingly
-        pa_memblockq_push(u->queue, &newchunk);
+	if (u->last_pb_ts != 0 && u->wistream.iw_in->timestamp < u->last_pb_ts) {
+		pa_log("Timestamps disordered. Previous ts : %lu, last ts : %lu, rewind : %lu",
+			u->last_pb_ts, u->wistream.iw_in->timestamp,
+			u->last_pb_ts - u->wistream.iw_in->timestamp);
+        goto ignore;
+	}
+
+    if (u->seqnb != 0 && u->wistream.iw_in->seq != (u->seqnb + 1)) {
+		u->lost_pb += u->wistream.iw_in->timestamp - u->last_pb_ts;
+		pa_proplist_setf(u->sink_input->proplist, "iwab.lost", "%lums lost", u->lost_pb / 1000);
+		pa_assert(u->wistream.iw_in->timestamp > u->last_pb_ts);
+		pa_usec_t missing = pa_usec_to_bytes(u->wistream.iw_in->timestamp - u->last_pb_ts, &u->ss);
+		pa_memchunk filler = newchunk;
+		while (missing > 0) {
+			if (newchunk.length > missing) {
+				filler.length = missing;
+			} else {
+				filler.length = newchunk.length;
+			}
+
+			/*
+			pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u. \
+					Missing %luus of playback, duplicating this chunk of length %luus",
+                u->seqnb, u->wistream.iw_in->seq,
+				pa_bytes_to_usec(missing, &u->ss),
+                pa_bytes_to_usec(filler.length, &u->ss));
+			*/
+			pa_memblockq_push(u->queue, &filler);
+			missing -= filler.length;
+		}
     }
 
     if (pa_memblockq_push(u->queue, &newchunk) < 0) {
@@ -280,6 +308,7 @@ int pa__init(pa_module*m) {
     u->module = m;
     u->core = m->core;
     u->seqnb = 0;
+    u->last_pb_ts = 0;
     u->rtpoll_item = NULL;
     // TODO: get actual sample spec from sender
     u->ss.format = PA_SAMPLE_S16LE;
@@ -312,6 +341,7 @@ int pa__init(pa_module*m) {
     pa_proplist_sets(data.proplist, PA_PROP_MEDIA_ROLE, "stream");
     pa_proplist_setf(data.proplist, PA_PROP_MEDIA_NAME, "wiscast streaming from %s",
             u->iface);
+	pa_proplist_setf(data.proplist, "iwab.lost", "%lums lost", 0UL);
     data.module = u->module;
     pa_sink_input_new_data_set_sample_spec(&data, &u->ss);
     pa_sink_input_new(&u->sink_input, u->module->core, &data);
