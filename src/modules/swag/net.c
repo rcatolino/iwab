@@ -20,6 +20,10 @@
 
 ssize_t wicast_read(struct wicast* wc, char* buffer, ssize_t max_length, size_t* data_offset) {
   ssize_t read_size;
+  struct radiotap_head* rt_in = NULL;
+  struct ieee80211_head* dot11_in = NULL;
+  struct l2_head* l2_in;
+  struct swag_head* sw_in;
   *data_offset = 0;
   if (!buffer) {
     errno = EINVAL;
@@ -36,44 +40,49 @@ ssize_t wicast_read(struct wicast* wc, char* buffer, ssize_t max_length, size_t*
     return -2;
   }
 
-  wc->rt_in = (struct radiotap_head*) (buffer + *data_offset); // i guess this is violating strict aliasing rules, but buffer content should be constant
-  *data_offset += wc->rt_in->length;
+  rt_in = (struct radiotap_head*) (buffer + *data_offset); // i guess this is violating strict aliasing rules, but buffer content should be constant
+  *data_offset += rt_in->length;
   if ((read_size - *data_offset) <= sizeof(struct ieee80211_head)) {
     errno = EAGAIN; // this is too small to be a wiscast packet
     return -3;
   }
 
-  wc->dot11_in = (struct ieee80211_head*) (buffer + *data_offset);
+  dot11_in = (struct ieee80211_head*) (buffer + *data_offset);
   *data_offset += sizeof(struct ieee80211_head) + sizeof(uint16_t); // skip qos field as well
-  if ((read_size - *data_offset) <= sizeof(struct l2_head) || wc->dot11_in->type != 2 || wc->dot11_in->subtype != 8) {
+  if ((read_size - *data_offset) <= sizeof(struct l2_head) || dot11_in->type != 2 || dot11_in->subtype != 8) {
     errno = EAGAIN; // too small or wrong type
     return -4;
   }
 
-  if (memcmp(wc->wi_h.dot11.addr1, wc->addr_filter, sizeof(wc->addr_filter)) != 0 ||
-      memcmp(wc->wi_h.dot11.addr2, wc->addr_filter, sizeof(wc->addr_filter)) != 0 ||
-      memcmp(wc->wi_h.dot11.addr3, wc->addr_filter, sizeof(wc->addr_filter)) != 0) {
+  if (memcmp(dot11_in->addr1, wc->addr_filter, sizeof(wc->addr_filter)) != 0 ||
+      memcmp(dot11_in->addr2, wc->addr_filter, sizeof(wc->addr_filter)) != 0 ||
+      memcmp(dot11_in->addr3, wc->addr_filter, sizeof(wc->addr_filter)) != 0) {
     pa_log("w1: %02x:%02x:%02x:%02x:%02x:%02x",
-        wc->wi_h.dot11.addr1[0], wc->wi_h.dot11.addr1[1], wc->wi_h.dot11.addr1[2],
-        wc->wi_h.dot11.addr1[3], wc->wi_h.dot11.addr1[4], wc->wi_h.dot11.addr1[5]);
+        dot11_in->addr1[0], dot11_in->addr1[1], dot11_in->addr1[2],
+        dot11_in->addr1[3], dot11_in->addr1[4], dot11_in->addr1[5]);
     errno = EAGAIN; // this is not a wicast packet
     return -5;
   }
 
-  wc->l2_in = (struct l2_head*) (buffer + *data_offset);
+  // TODO: why do we even have this layer ?
+  l2_in = (struct l2_head*) (buffer + *data_offset);
   *data_offset += sizeof(struct l2_head);
   if (read_size - *data_offset <= sizeof(struct swag_head)) {
     errno = EAGAIN;
     return -6;
   }
 
-  wc->sw_in = (struct swag_head*) (buffer + *data_offset);
+  sw_in = (struct swag_head*) (buffer + *data_offset);
   *data_offset += sizeof(struct swag_head);
   if (read_size - *data_offset <= 4) {
     errno = EAGAIN;
     return -7;
   }
 
+  wc->rt_in = rt_in;
+  wc->dot11_in = dot11_in;
+  wc->l2_in = l2_in;
+  wc->sw_in = sw_in;
   return read_size - (*data_offset + 4); // 4 is for the FCS
 }
 

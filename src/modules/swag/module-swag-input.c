@@ -28,6 +28,7 @@
 #include <pulsecore/sink-input.h>
 #include <pulsecore/log.h>
 #include <pulsecore/core-util.h>
+#include <pulsecore/memblockq.h>
 #include <pulsecore/modargs.h>
 #include <pulsecore/macro.h>
 #include <pulsecore/namereg.h>
@@ -63,7 +64,7 @@ struct userdata {
     pa_module *module;
     pa_sink_input *sink_input;
     const char *iface;
-    pa_memchunk memchunk;
+    pa_memblockq *queue;
     bool first_packet;
     pa_usec_t offset;
     pa_rtpoll_item *rtpoll_item;
@@ -79,7 +80,8 @@ static int sink_input_process_msg(pa_msgobject *o, int code, void *data, int64_t
 
     switch (code) {
         case PA_SINK_INPUT_MESSAGE_GET_LATENCY:
-            *((int64_t*) data) = pa_bytes_to_usec(MAX_FRAME_SIZE, &u->sink_input->sample_spec);
+            *((pa_usec_t*) data) = pa_bytes_to_usec(pa_memblockq_get_length(u->queue),
+                    &u->sink_input->sample_spec);
 
             /* Fall through, the default handler will add in the extra
              * latency added by the resampler */
@@ -95,32 +97,27 @@ static void sink_input_process_rewind_cb(pa_sink_input *i, size_t nbytes) {
     pa_sink_input_assert_ref(i);
     pa_assert_se(u = i->userdata);
 
-    if (!u->memchunk.memblock) {
-        return;
-    }
-
-    if (nbytes >= u->memchunk.length) {
-        nbytes = u->memchunk.length;
-        pa_memblock_unref(u->memchunk.memblock);
-        pa_memchunk_reset(&u->memchunk);
-    } else {
-        u->memchunk.length -= nbytes;
-        u->memchunk.index += nbytes;
-    }
+    pa_memblockq_rewind(u->queue, nbytes);
 }
 
-/* Called from I/O thread context */
+// according to sink-input.h it is better to ignore the `length` argument if we already
+// have the data
 static int sink_input_pop_cb(pa_sink_input *i, size_t length, pa_memchunk *chunk) {
     struct userdata* u;
     pa_sink_input_assert_ref(i);
     pa_assert_se(u = i->userdata);
 
-    if (u->memchunk.length == 0) {
+    if (pa_memblockq_peek(u->queue, chunk) < 0) {
+        pa_log("Warning, buffer underrun : %zd bytes requested but queue empty",
+                length);
         return -1;
     }
 
-    *chunk = u->memchunk;
-    pa_memchunk_reset(&u->memchunk);
+    /*
+    pa_log("new packet requested, queue size : %u packets, sending %zu bytes",
+            pa_memblockq_get_nblocks(u->queue), chunk->length);
+    */
+    pa_memblockq_drop(u->queue, chunk->length);
     return 0;
 }
 
@@ -143,12 +140,9 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     ssize_t l;
     void *p;
     pa_memchunk newchunk;
-    pa_assert_se(u = pa_rtpoll_item_get_work_userdata(i));
 
+    pa_assert_se(u = pa_rtpoll_item_get_work_userdata(i));
     pa_memchunk_reset(&newchunk);
-    newchunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
-
-    pa_assert_se(u = pa_rtpoll_item_get_work_userdata(i));
 
     pollfd = pa_rtpoll_item_get_pollfd(i, NULL);
 
@@ -167,6 +161,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         return 0;
     }
 
+    newchunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
     for (;;) {
         p = pa_memblock_acquire(newchunk.memblock);
         l = wicast_read(&u->wistream, (char*) p, pa_memblock_get_length(newchunk.memblock),
@@ -178,7 +173,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
                 pa_log("invalid dot11, type %u, subtype %u, rt offset : %zu",
                         u->wistream.dot11_in->type,
                         u->wistream.dot11_in->subtype,
-                        u->memchunk.index);
+                        newchunk.index);
             }
 
             if (errno == EINTR) {
@@ -187,12 +182,12 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
             }
 
             if (errno == EAGAIN) {
-                // no data available, or invalid packet
-                return 0;
+                // no data yet available, or invalid packet
+                goto ignore;
             }
 
             pa_log("Failed to read wireless data : %s", pa_cstrerror(errno));
-            return 0; // TODO: How can we signal an error ?
+            goto ignore; // TODO: can/should we signal an error ?
         }
 
         newchunk.length = l;
@@ -200,15 +195,19 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     }
 
     if (u->wistream.sw_in->seq == u->seqnb) {
-        return 0;
+        // this is a repeat packet
+        goto ignore;
     }
 
-    if (u->memchunk.memblock) {
-        pa_log("Buffer overrun, new packet received but previous chunk not yet consumed");
-        pa_memblock_unref(u->memchunk.memblock);
+    if (pa_memblockq_push(u->queue, &newchunk) < 0) {
+        pa_log("Buffer overrun, new packet received but audio queue is full (%u packets)",
+                pa_memblockq_get_nblocks(u->queue));
+        // pa_memblockq_seek(u->queue, (int64_t) chunk.length, PA_SEEK_RELATIVE, true); // TODO: why ?
+    } else {
+        //pa_log("new packet received queue size : %u packets", pa_memblockq_get_nblocks(u->queue));
     }
 
-    u->memchunk = newchunk;
+    pa_memblock_unref(newchunk.memblock);
 
     if (u->seqnb == 0) {
         u->offset = u->wistream.sw_in->timestamp;
@@ -219,6 +218,13 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     u->seqnb = u->wistream.sw_in->seq;
 
     return 1;
+
+ignore:
+    if (newchunk.memblock) {
+        pa_memblock_unref(newchunk.memblock);
+    }
+
+    return 0;
 }
 
 
@@ -257,6 +263,7 @@ int pa__init(pa_module*m) {
     pa_modargs *ma = NULL;
     pa_sink *sink;
     pa_sink_input_new_data data;
+    pa_memchunk silence;
 
     pa_assert(m);
 
@@ -268,7 +275,6 @@ int pa__init(pa_module*m) {
     m->userdata = u = pa_xnew(struct userdata, 1);
     u->module = m;
     u->core = m->core;
-    pa_memchunk_reset(&u->memchunk);
     u->seqnb = 0;
     u->offset = 0;
     u->rtpoll_item = NULL;
@@ -290,13 +296,13 @@ int pa__init(pa_module*m) {
 
     pa_make_fd_nonblock(u->wistream.fd);
 
+    // setup sink input
     if (!(sink = pa_namereg_get(u->module->core,
                     pa_modargs_get_value(ma, "sink", NULL), PA_NAMEREG_SINK))) {
         pa_log("Sink does not exist.");
         goto fail;
     }
 
-    // setup sink input
     pa_sink_input_new_data_init(&data);
     pa_sink_input_new_data_set_sink(&data, sink, false, true);
     data.driver = __FILE__;
@@ -321,10 +327,22 @@ int pa__init(pa_module*m) {
     u->sink_input->kill = sink_input_kill_cb;
     u->sink_input->process_rewind = sink_input_process_rewind_cb;
 
+    // setup audio buffer
+    pa_sink_input_get_silence(u->sink_input, &silence);
+    u->queue = pa_memblockq_new(
+            "module-swag-input memblockq",
+            0,
+            10*MAX_FRAME_SIZE,
+            5*MAX_FRAME_SIZE,
+            &u->ss,
+            5*MAX_FRAME_SIZE,
+            0,
+            0,
+            &silence);
+    pa_memblock_unref(silence.memblock);
+
     pa_sink_input_put(u->sink_input);
-
     pa_modargs_free(ma);
-
     return 0;
 
 fail:
@@ -351,8 +369,8 @@ void pa__done(pa_module*m) {
     if (!(u = m->userdata))
         return;
 
-    if (u->memchunk.memblock) {
-        pa_memblock_unref(u->memchunk.memblock);
+    if (u->queue) {
+        pa_memblockq_free(u->queue);
     }
 
     if (u->wistream.fd) {
