@@ -170,9 +170,9 @@ int iwab_open(struct iwab* iw, const char* iface) {
 
   strncpy(ifr.ifr_name, iface, sizeof(ifr.ifr_name) - 1);
   if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
-		printf("ifindex lookup ioctl error for interface %s: %s\n", iface, strerror(errno));
-		return -3;
-	}
+    printf("ifindex lookup ioctl error for interface %s: %s\n", iface, strerror(errno));
+    return -3;
+  }
 
   sll.sll_family = AF_PACKET;
   sll.sll_protocol = htobe16(ETH_P_ALL);

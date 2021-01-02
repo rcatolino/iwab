@@ -72,7 +72,7 @@ struct userdata {
     struct iwab istream;
     int retries;
     pa_sample_spec ss;
-	pa_usec_t lost_pb;
+    pa_usec_t lost_pb;
 };
 
 /* Called from I/O thread context */
@@ -198,43 +198,43 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         goto ignore;
     }
 
-	pa_assert(pa_frame_aligned(newchunk.length, &u->ss));
-	if (u->seqnb != 0 && u->istream.iw_in->seq < u->seqnb) {
-		pa_log("Packet disordered. Previous seq : %u, last seq : %u, rewind : %u",
-			u->seqnb, u->istream.iw_in->seq, u->seqnb - u->istream.iw_in->seq);
-		goto ignore;
-	}
-
-	if (u->last_pb_ts != 0 && u->istream.iw_in->timestamp < u->last_pb_ts) {
-		pa_log("Timestamps disordered. Previous ts : %lu, last ts : %lu, rewind : %lu",
-			u->last_pb_ts, u->istream.iw_in->timestamp,
-			u->last_pb_ts - u->istream.iw_in->timestamp);
+    pa_assert(pa_frame_aligned(newchunk.length, &u->ss));
+    if (u->seqnb != 0 && u->istream.iw_in->seq < u->seqnb) {
+        pa_log("Packet disordered. Previous seq : %u, last seq : %u, rewind : %u",
+            u->seqnb, u->istream.iw_in->seq, u->seqnb - u->istream.iw_in->seq);
         goto ignore;
-	}
+    }
+
+    if (u->last_pb_ts != 0 && u->istream.iw_in->timestamp < u->last_pb_ts) {
+        pa_log("Timestamps disordered. Previous ts : %lu, last ts : %lu, rewind : %lu",
+            u->last_pb_ts, u->istream.iw_in->timestamp,
+            u->last_pb_ts - u->istream.iw_in->timestamp);
+        goto ignore;
+    }
 
     if (u->seqnb != 0 && u->istream.iw_in->seq != (u->seqnb + 1)) {
-		u->lost_pb += u->istream.iw_in->timestamp - u->last_pb_ts;
-		pa_proplist_setf(u->sink_input->proplist, "iwab.lost", "%lums lost", u->lost_pb / 1000);
-		pa_assert(u->istream.iw_in->timestamp > u->last_pb_ts);
-		pa_usec_t missing = pa_usec_to_bytes(u->istream.iw_in->timestamp - u->last_pb_ts, &u->ss);
-		pa_memchunk filler = newchunk;
-		while (missing > 0) {
-			if (newchunk.length > missing) {
-				filler.length = missing;
-			} else {
-				filler.length = newchunk.length;
-			}
+        u->lost_pb += u->istream.iw_in->timestamp - u->last_pb_ts;
+        pa_proplist_setf(u->sink_input->proplist, "iwab.lost", "%lums lost", u->lost_pb / 1000);
+        pa_assert(u->istream.iw_in->timestamp > u->last_pb_ts);
+        pa_usec_t missing = pa_usec_to_bytes(u->istream.iw_in->timestamp - u->last_pb_ts, &u->ss);
+        pa_memchunk filler = newchunk;
+        while (missing > 0) {
+            if (newchunk.length > missing) {
+                filler.length = missing;
+            } else {
+                filler.length = newchunk.length;
+            }
 
-			/*
-			pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u. \
-					Missing %luus of playback, duplicating this chunk of length %luus",
+            /*
+            pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u. \
+                    Missing %luus of playback, duplicating this chunk of length %luus",
                 u->seqnb, u->istream.iw_in->seq,
-				pa_bytes_to_usec(missing, &u->ss),
+                pa_bytes_to_usec(missing, &u->ss),
                 pa_bytes_to_usec(filler.length, &u->ss));
-			*/
-			pa_memblockq_push(u->queue, &filler);
-			missing -= filler.length;
-		}
+            */
+            pa_memblockq_push(u->queue, &filler);
+            missing -= filler.length;
+        }
     }
 
     if (pa_memblockq_push(u->queue, &newchunk) < 0) {
@@ -341,7 +341,7 @@ int pa__init(pa_module*m) {
     pa_proplist_sets(data.proplist, PA_PROP_MEDIA_ROLE, "stream");
     pa_proplist_setf(data.proplist, PA_PROP_MEDIA_NAME, "wiscast streaming from %s",
             u->iface);
-	pa_proplist_setf(data.proplist, "iwab.lost", "%lums lost", 0UL);
+    pa_proplist_setf(data.proplist, "iwab.lost", "%lums lost", 0UL);
     data.module = u->module;
     pa_sink_input_new_data_set_sample_spec(&data, &u->ss);
     pa_sink_input_new(&u->sink_input, u->module->core, &data);
