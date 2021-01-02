@@ -73,7 +73,7 @@ struct iwab_head {
   uint32_t seq;
   uint64_t timestamp;
   uint8_t retry;
-  uint8_t pad[7];
+  uint8_t pad[7]; // align on 64bit boundary
 }__attribute__((packed));
 
 struct headers {
@@ -85,10 +85,13 @@ struct headers {
 
 struct iwab {
   int fd;
+  // the following pointers are used when receiving,
+  // the buffer will be allocated by the user
   struct radiotap_head* rt_in;
   struct ieee80211_head* dot11_in;
   struct l2_head* l2_in;
   struct iwab_head* iw_in;
+  // the following struct are used when sending, allocation is static
   union {
       struct radiotap rt_h;
       uint8_t rt_h_buff[sizeof(struct radiotap)];
@@ -97,7 +100,6 @@ struct iwab {
       struct headers wi_h;
       uint8_t wi_h_buff[sizeof(struct headers)];
   };
-  int head_length;
   struct iovec iov[3]; //Fixed headers, body
   uint8_t addr_filter[6];
 };

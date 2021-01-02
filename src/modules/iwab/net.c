@@ -22,8 +22,8 @@ ssize_t iwab_read(struct iwab* iw, char* buffer, ssize_t max_length, size_t* dat
   ssize_t read_size;
   struct radiotap_head* rt_in = NULL;
   struct ieee80211_head* dot11_in = NULL;
-  struct l2_head* l2_in;
-  struct iwab_head* iw_in;
+  struct l2_head* l2_in = NULL;
+  struct iwab_head* iw_in = NULL;
   *data_offset = 0;
   if (!buffer) {
     errno = EINVAL;
@@ -90,7 +90,9 @@ int iwab_send(struct iwab* iw, char* buffer, ssize_t length, uint64_t timestamp,
   }
 
   iw->wi_h.iw_h.length = length;
-  iw->wi_h.iw_h.seq += 1;
+  if (retried == 0) {
+      iw->wi_h.iw_h.seq += 1;
+  }
   iw->wi_h.iw_h.timestamp = timestamp;
   iw->wi_h.iw_h.retry = retried;
   iw->iov[2].iov_base = buffer;
@@ -160,8 +162,7 @@ int iwab_open(struct iwab* iw, const char* iface) {
     return -1;
   }
 
-  //int fd = socket(AF_PACKET, SOCK_RAW, htobe16(ETH_P_ALL));
-  int fd = socket(AF_PACKET, SOCK_DGRAM, htobe16(ETH_P_ALL));
+  int fd = socket(AF_PACKET, SOCK_RAW, htobe16(ETH_P_ALL));
   if (fd < 0) {
     printf("Error oppening raw socket : %s\n", strerror(errno));
     return -2;
