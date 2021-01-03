@@ -24,6 +24,7 @@
 
 #include <errno.h>
 
+#include <pulse/rtclock.h>
 #include <pulsecore/core-error.h>
 #include <pulsecore/sink-input.h>
 #include <pulsecore/log.h>
@@ -48,10 +49,7 @@ PA_MODULE_USAGE(
 #define DEFAULT_SOURCE_NAME "iwabsrc"
 #define DEFAULT_IFACE "mon0"
 #define MAX_FRAME_SIZE 1600
-
-#define MEMBLOCKQ_MAXLENGTH (1024*1024*40)
-#define DEATH_TIMEOUT 20
-#define RATE_UPDATE_INTERVAL (5*PA_USEC_PER_SEC)
+#define STAT_PERIOD 10*1000*1000 //10s
 
 static const char* const valid_modargs[] = {
     "sink",
@@ -72,20 +70,26 @@ struct userdata {
     struct iwab istream;
     int retries;
     pa_sample_spec ss;
-    pa_usec_t lost_pb;
+    pa_usec_t stat_time;
+    struct {
+        pa_usec_t lost;
+        pa_usec_t overrun;
+        pa_usec_t underrun;
+        uint32_t queue_nblocks;
+        uint32_t count;
+    } stats;
 };
 
 /* Called from I/O thread context */
 static int sink_input_process_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *chunk) {
     struct userdata *u = PA_SINK_INPUT(o)->userdata;
+    pa_log("iwab sink input process msg");
 
     switch (code) {
+        // TODO: add latency from sink
         case PA_SINK_INPUT_MESSAGE_GET_LATENCY:
             *((pa_usec_t*) data) = pa_bytes_to_usec(pa_memblockq_get_length(u->queue),
                     &u->sink_input->sample_spec);
-
-            /* Fall through, the default handler will add in the extra
-             * latency added by the resampler */
             break;
     }
 
@@ -109,6 +113,7 @@ static int sink_input_pop_cb(pa_sink_input *i, size_t length, pa_memchunk *chunk
     pa_assert_se(u = i->userdata);
 
     if (pa_memblockq_peek(u->queue, chunk) < 0) {
+        u->stats.underrun += pa_bytes_to_usec(length, &u->ss);
         pa_log("Warning, buffer underrun : %zd bytes requested but queue empty",
                 length);
         return -1;
@@ -119,16 +124,31 @@ static int sink_input_pop_cb(pa_sink_input *i, size_t length, pa_memchunk *chunk
 }
 
 static void sink_input_kill_cb(pa_sink_input *i) {
-    struct userdata *u;
+    pa_log("iwab sink input kill : start");
 
     pa_sink_input_assert_ref(i);
-    pa_assert_se(u = i->userdata);
 
-    pa_sink_input_unlink(u->sink_input);
-    pa_sink_input_unref(u->sink_input);
-    u->sink_input = NULL;
+    pa_sink_input_unlink(i);
+    pa_sink_input_unref(i);
 
-    pa_module_unload_request(u->module, true);
+    pa_log("iwab sink input kill : sink unlinked");
+}
+
+static void update_stats(struct userdata* u, pa_usec_t now) {
+    pa_assert(now > u->stat_time);
+    pa_usec_t timediff = (now - u->stat_time) / 1000; // ms per period
+    u->stat_time = now;
+
+    pa_proplist_setf(u->sink_input->proplist, "iwab.lost", "%lums/s", u->stats.lost / timediff);
+    pa_proplist_setf(u->sink_input->proplist, "iwab.underrun", "%lums/s", u->stats.underrun / timediff);
+    pa_proplist_setf(u->sink_input->proplist, "iwab.overrun", "%lums/s", u->stats.overrun / timediff);
+    pa_proplist_setf(u->sink_input->proplist, "iwab.avg_queue_nblocks", "%u packets",
+            u->stats.queue_nblocks / u->stats.count);
+    u->stats.lost = 0;
+    u->stats.overrun = 0;
+    u->stats.underrun = 0;
+    u->stats.queue_nblocks = 0;
+    u->stats.count = 0;
 }
 
 static int rtpoll_work_cb(pa_rtpoll_item *i) {
@@ -136,6 +156,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     struct pollfd *pollfd;
     ssize_t l;
     void *p;
+    pa_usec_t now = pa_rtclock_now();
     pa_memchunk newchunk;
 
     pa_assert_se(u = pa_rtpoll_item_get_work_userdata(i));
@@ -213,8 +234,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     }
 
     if (u->seqnb != 0 && u->istream.iw_in->seq != (u->seqnb + 1)) {
-        u->lost_pb += u->istream.iw_in->timestamp - u->last_pb_ts;
-        pa_proplist_setf(u->sink_input->proplist, "iwab.lost", "%lums lost", u->lost_pb / 1000);
+        u->stats.lost += u->istream.iw_in->timestamp - u->last_pb_ts;
         pa_assert(u->istream.iw_in->timestamp > u->last_pb_ts);
         pa_usec_t missing = pa_usec_to_bytes(u->istream.iw_in->timestamp - u->last_pb_ts, &u->ss);
         pa_memchunk filler = newchunk;
@@ -241,13 +261,19 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         pa_log("Buffer overrun, new packet received but audio queue is full (%u packets)",
                 pa_memblockq_get_nblocks(u->queue));
         //pa_memblockq_seek(u->queue, (int64_t) newchunk.length, PA_SEEK_RELATIVE, true); // TODO: why ?
-    } else {
-        //pa_log("new packet received queue size : %u packets", pa_memblockq_get_nblocks(u->queue));
+        u->stats.overrun += pa_bytes_to_usec(newchunk.length, &u->ss);
     }
+
+    u->stats.count += 1;
+    u->stats.queue_nblocks += pa_memblockq_get_nblocks(u->queue);
 
     u->seqnb = u->istream.iw_in->seq;
     u->last_pb_ts = u->istream.iw_in->timestamp + pa_bytes_to_usec(newchunk.length, &u->ss);
     pa_memblock_unref(newchunk.memblock);
+
+    if (now >= u->stat_time + STAT_PERIOD) {
+        update_stats(u, now);
+    }
 
     return 1;
 
@@ -265,12 +291,14 @@ static void sink_input_attach(pa_sink_input *i) {
     struct userdata *u;
     struct pollfd *p;
 
+    pa_log("Sink input iwab attached");
     pa_sink_input_assert_ref(i);
     pa_assert_se(u = i->userdata);
     pa_assert(!u->rtpoll_item);
     pa_assert(i->sink->thread_info.rtpoll); // This sink must have an rtpoll !
 
     u->rtpoll_item = pa_rtpoll_item_new(i->sink->thread_info.rtpoll, PA_RTPOLL_LATE, 1);
+    u->stat_time = pa_rtclock_now();
     p = pa_rtpoll_item_get_pollfd(u->rtpoll_item, NULL);
     p->fd = u->istream.fd;
     p->events = POLLIN;
@@ -282,12 +310,14 @@ static void sink_input_attach(pa_sink_input *i) {
 /* Called from I/O thread context */
 static void sink_input_detach(pa_sink_input *i) {
     struct userdata *u;
+    pa_log("Sink input detach : start");
     pa_sink_input_assert_ref(i);
     pa_assert_se(u = i->userdata);
     pa_assert(u->rtpoll_item);
 
     pa_rtpoll_item_free(u->rtpoll_item);
     u->rtpoll_item = NULL;
+    pa_log("Sink input detach : iwab rtpoll freed");
 }
 
 int pa__init(pa_module*m) {
@@ -305,6 +335,7 @@ int pa__init(pa_module*m) {
     }
 
     m->userdata = u = pa_xnew(struct userdata, 1);
+    memset(&u->stats, 0, sizeof(u->stats));
     u->module = m;
     u->core = m->core;
     u->seqnb = 0;
@@ -341,9 +372,12 @@ int pa__init(pa_module*m) {
     pa_proplist_sets(data.proplist, PA_PROP_MEDIA_ROLE, "stream");
     pa_proplist_setf(data.proplist, PA_PROP_MEDIA_NAME, "wiscast streaming from %s",
             u->iface);
-    pa_proplist_setf(data.proplist, "iwab.lost", "%lums lost", 0UL);
+    pa_proplist_setf(data.proplist, "iwab.lost", "%lums", 0UL);
+    pa_proplist_setf(data.proplist, "iwab.overrun", "%lums", 0UL);
+    pa_proplist_setf(data.proplist, "iwab.underrun", "%lums", 0UL);
     data.module = u->module;
     pa_sink_input_new_data_set_sample_spec(&data, &u->ss);
+    //data.flags = PA_SINK_INPUT_DONT_INHIBIT_AUTO_SUSPEND;
     pa_sink_input_new(&u->sink_input, u->module->core, &data);
     pa_sink_input_new_data_done(&data);
 
@@ -398,9 +432,14 @@ void pa__done(pa_module*m) {
     struct userdata *u;
 
     pa_assert(m);
+    pa_log("Sink input iwab done : start");
 
     if (!(u = m->userdata))
         return;
+
+    if (u->sink_input) {
+        sink_input_kill_cb(u->sink_input);
+    }
 
     if (u->queue) {
         pa_memblockq_free(u->queue);
@@ -410,5 +449,8 @@ void pa__done(pa_module*m) {
         pa_assert_se(iwab_close(&u->istream) == 0);
     }
 
+    memset(u, 0, sizeof(struct userdata));
     pa_xfree(u);
+    m->userdata = NULL;
+    pa_log("Sink input iwab done : userdata freed");
 }

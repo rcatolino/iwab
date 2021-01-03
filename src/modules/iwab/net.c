@@ -102,7 +102,6 @@ int iwab_send(struct iwab* iw, char* buffer, ssize_t length, uint64_t timestamp,
 }
 
 static void iwab_setup(struct iwab* iw) {
-  memset(iw, 0, sizeof(struct iwab));
   iw->rt_h.head.version = 0;
   iw->rt_h.head.length = sizeof(iw->rt_h) + 5; // If the number of argument changes in the bitmap, type args count must be raised in net.h
   iw->rt_h.head.bitmap = RADIOTAP_TX_FLAGS | RADIOTAP_MCS;
@@ -156,6 +155,7 @@ int iwab_open(struct iwab* iw, const char* iface) {
   struct ifreq ifr;
   memset(&sll, 0, sizeof(sll));
   memset(&ifr, 0, sizeof(ifr));
+  memset(iw, 0, sizeof(struct iwab));
 
   if (!iw || !iface) {
     errno = EINVAL;
