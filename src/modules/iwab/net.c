@@ -103,15 +103,15 @@ int iwab_send(struct iwab* iw, char* buffer, ssize_t length, uint64_t timestamp,
 
 static void iwab_setup(struct iwab* iw) {
   iw->rt_h.head.version = 0;
-  iw->rt_h.head.length = sizeof(iw->rt_h) + 5; // If the number of argument changes in the bitmap, type args count must be raised in net.h
+  iw->rt_h.head.length = sizeof(iw->rt_h);
   iw->rt_h.head.bitmap = RADIOTAP_TX_FLAGS | RADIOTAP_MCS;
 
   iw->rt_h.args[0] = 0x20 | 0x08; // TX_FLAGS = RADIOTAP_F_TX_NOACK | RADIOTAP_F_TX_DONT_REORDER
   iw->rt_h.args[1] = 0x0; // TX_FLAGS
   iw->rt_h.args[2] = 0x2 | 0x10; // MCS_INDEX_KNOWN | FEC KNOWN
   iw->rt_h.args[3] = 0x10; // Use LDPC FEC encoding
-  iw->rt_h.args[4] = 0x1; // MCS INDEX (QPSK 1/2)
-  //iw->rt_args[4] = 0x3; // MCS INDEX (16-QAM 1/2)
+  //iw->rt_h.args[4] = 0x1; // MCS INDEX (QPSK 1/2)
+  iw->rt_h.args[4] = 0x3; // MCS INDEX (16-QAM 1/2)
 
   iw->wi_h.dot11.version = 0;
   iw->wi_h.dot11.type = 2; // data frame

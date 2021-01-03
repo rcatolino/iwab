@@ -72,8 +72,8 @@ struct userdata {
     pa_rtpoll *rtpoll;
 
     pa_usec_t block_usec;
-    pa_usec_t stream_ts_abs; // time for the next packet render
-    pa_usec_t stream_resend_abs;
+    pa_usec_t stream_ts_abs; // time when to render and send the next packdt
+    pa_usec_t stream_resend_abs; // time when to resend current packet
     const char *iface;
     int retries;
     struct iwab istream;
@@ -102,7 +102,11 @@ static int sink_process_msg(
     switch (code) {
         case PA_SINK_MESSAGE_GET_LATENCY: { // We can do this lock free, we should override get_latency() instead
             pa_usec_t now = pa_rtclock_now();
-            pa_usec_t latency = u->stream_ts_abs - now;
+            pa_usec_t latency = pa_bytes_to_usec(MAX_FRAME_SIZE, &u->sink->sample_spec);
+            if (now < u->stream_ts_abs) {
+                latency += u->stream_ts_abs - now;
+            }
+
             *((int64_t*) data) = (int64_t) latency;
             pa_log("Get latency : %ldus", latency);
             return 0;
@@ -170,11 +174,13 @@ static void thread_func(void *userdata) {
         int ret;
         char * p;
 
-        if (PA_SINK_IS_OPENED(u->sink->thread_info.state))
+        if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
             now = pa_rtclock_now();
+        }
 
-        if (PA_UNLIKELY(u->sink->thread_info.rewind_requested))
+        if (PA_UNLIKELY(u->sink->thread_info.rewind_requested)) {
             pa_sink_process_rewind(u->sink, 0);
+        }
 
         if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
             if (now >= u->stream_ts_abs) { // is it time to render the next chunk already ?
@@ -182,10 +188,12 @@ static void thread_func(void *userdata) {
                 pa_sink_render(u->sink, u->sink->thread_info.max_request, &u->chunk);
                 u->retries = 0;
                 pa_assert(u->chunk.length > 0);
-                /*
-                pa_log("stream_ts: %lu, now : %lu, retries : %d, rendering & sending.",
-                        u->stream_ts_abs, now, u->retries);
-                */
+                chunk_time = pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec);
+                if (now >= u->stream_ts_abs + (chunk_time/2)) {
+                    pa_log("Warning, late render. stream_ts: %lu, now : %lu, delay : %lu, rendering & sending %lu us.",
+                            u->stream_ts_abs, now, now - u->stream_ts_abs, chunk_time);
+                    u->stream_ts_abs = now;
+                }
 
                 p = pa_memblock_acquire(u->chunk.memblock);
                 ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->stream_ts_abs, u->retries);
@@ -196,15 +204,15 @@ static void thread_func(void *userdata) {
 
                 pa_memblock_release(u->chunk.memblock);
                 u->retries += 1;
-                chunk_time = pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec);
                 u->stream_resend_abs = u->stream_ts_abs + chunk_time / 2;
                 u->stream_ts_abs += chunk_time;
                 pa_rtpoll_set_timer_absolute(u->rtpoll, u->stream_resend_abs);
             } else if (now >= u->stream_resend_abs && u->retries <= 1) {
                 /*
-                pa_log("stream_resend_ts: %lu, now : %lu, retries : %d, rendering & sending.",
-                        u->stream_resend_abs, now, u->retries);
+                pa_log("stream_resend_ts: %lu, now : %lu, now : %lu, rendering & sending %lu us.",
+                        u->stream_resend_abs, now, now-u->stream_resend_abs, pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec));
                 */
+
                 p = pa_memblock_acquire(u->chunk.memblock);
                 ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->istream.wi_h.iw_h.timestamp, u->retries);
                 if (ret < 0) {
