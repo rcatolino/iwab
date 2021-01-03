@@ -123,7 +123,8 @@ static void iwab_setup(struct iwab* iw) {
   memset(iw->wi_h.dot11.addr3, 0, sizeof(iw->wi_h.dot11.addr3));
   iw->wi_h.dot11.frag_nb = 0;
   iw->wi_h.dot11.seq_nb = 0;
-  iw->wi_h.dot11qos= 0;
+  iw->wi_h.dot11qos.priority = 6;
+  iw->wi_h.dot11qos.ack_policy = 1;
   memset(iw->wi_h.l2.src_mac, 0, sizeof(iw->wi_h.l2.src_mac));
   memset(iw->wi_h.l2.dst_mac, 0, sizeof(iw->wi_h.l2.dst_mac));
   iw->wi_h.l2.ethertype = 0x8454;

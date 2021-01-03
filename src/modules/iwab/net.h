@@ -60,6 +60,15 @@ struct ieee80211_head {
   uint16_t seq_nb : 12;
 }__attribute__((packed));
 
+struct ieee80211_qos {
+  uint16_t priority : 3;
+  uint16_t padding : 1;
+  uint16_t txop_dur_req : 1;
+  uint16_t ack_policy : 2;
+  uint16_t payload_type : 1;
+  uint16_t txop_duration : 8;
+}__attribute__((packed));
+
 struct l2_head {
   uint8_t src_mac[6];
   uint8_t dst_mac[6];
@@ -78,7 +87,7 @@ struct iwab_head {
 
 struct headers {
   struct ieee80211_head dot11;
-  uint16_t dot11qos;
+  struct ieee80211_qos dot11qos;
   struct l2_head l2;
   struct iwab_head iw_h;
 }__attribute__((packed));
