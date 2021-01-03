@@ -83,13 +83,15 @@ struct userdata {
 /* Called from I/O thread context */
 static int sink_input_process_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *chunk) {
     struct userdata *u = PA_SINK_INPUT(o)->userdata;
-    pa_log("iwab sink input process msg");
 
     switch (code) {
         // TODO: add latency from sink
         case PA_SINK_INPUT_MESSAGE_GET_LATENCY:
             *((pa_usec_t*) data) = pa_bytes_to_usec(pa_memblockq_get_length(u->queue),
                     &u->sink_input->sample_spec);
+            break;
+        case PA_SINK_INPUT_MESSAGE_SET_STATE:
+            pa_log_debug("Sink input state changed : %d", u->sink_input->thread_info.state);
             break;
     }
 
@@ -114,8 +116,13 @@ static int sink_input_pop_cb(pa_sink_input *i, size_t length, pa_memchunk *chunk
 
     if (pa_memblockq_peek(u->queue, chunk) < 0) {
         u->stats.underrun += pa_bytes_to_usec(length, &u->ss);
-        pa_log("Warning, buffer underrun : %zd bytes requested but queue empty",
+        pa_log_debug("Warning, buffer underrun : %zd bytes requested but queue empty.",
                 length);
+        if (u->stats.underrun > 500000 && u->sink_input->thread_info.state != PA_SINK_INPUT_CORKED) {
+            pa_log("Lots of underrun, corking sink input");
+            pa_sink_input_set_state_within_thread(u->sink_input, PA_SINK_INPUT_CORKED);
+        }
+
         return -1;
     }
 
@@ -124,14 +131,27 @@ static int sink_input_pop_cb(pa_sink_input *i, size_t length, pa_memchunk *chunk
 }
 
 static void sink_input_kill_cb(pa_sink_input *i) {
-    pa_log("iwab sink input kill : start");
-
     pa_sink_input_assert_ref(i);
 
     pa_sink_input_unlink(i);
     pa_sink_input_unref(i);
+}
 
-    pa_log("iwab sink input kill : sink unlinked");
+/* Called from IO context */
+static void sink_input_suspend_within_thread(pa_sink_input* i, bool b) {
+    struct userdata *u;
+    pa_sink_input_assert_ref(i);
+    pa_assert_se(u = i->userdata);
+
+    if (b) {
+        pa_memblockq_flush_read(u->queue);
+        pa_log("sink input suspended");
+    } else {
+        pa_log("sink input resumed");
+        u->last_pb_ts = 0;
+        u->seqnb = 0;
+        memset(&u->stats, 0, sizeof(u->stats));
+    }
 }
 
 static void update_stats(struct userdata* u, pa_usec_t now) {
@@ -175,10 +195,6 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
 
     pollfd->revents = 0;
 
-    if (!PA_SINK_IS_OPENED(u->sink_input->sink->thread_info.state)) {
-        return 0;
-    }
-
     newchunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
     for (;;) {
         p = pa_memblock_acquire(newchunk.memblock);
@@ -212,6 +228,15 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
 
         newchunk.length = l;
         break;
+    }
+
+    if (u->sink_input->thread_info.state == PA_SINK_INPUT_CORKED) {
+        // We read a valid packet, but sink input is corked, let's start up again
+        pa_sink_input_set_state_within_thread(u->sink_input, PA_SINK_INPUT_RUNNING);
+    }
+
+    if (!PA_SINK_IS_OPENED(u->sink_input->sink->thread_info.state)) {
+        return 0;
     }
 
     if (u->istream.iw_in->seq == u->seqnb) {
@@ -258,7 +283,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     }
 
     if (pa_memblockq_push(u->queue, &newchunk) < 0) {
-        pa_log("Buffer overrun, new packet received but audio queue is full (%u packets)",
+        pa_log_debug("Buffer overrun, new packet received but audio queue is full (%u packets)",
                 pa_memblockq_get_nblocks(u->queue));
         //pa_memblockq_seek(u->queue, (int64_t) newchunk.length, PA_SEEK_RELATIVE, true); // TODO: why ?
         u->stats.overrun += pa_bytes_to_usec(newchunk.length, &u->ss);
@@ -291,7 +316,6 @@ static void sink_input_attach(pa_sink_input *i) {
     struct userdata *u;
     struct pollfd *p;
 
-    pa_log("Sink input iwab attached");
     pa_sink_input_assert_ref(i);
     pa_assert_se(u = i->userdata);
     pa_assert(!u->rtpoll_item);
@@ -310,14 +334,12 @@ static void sink_input_attach(pa_sink_input *i) {
 /* Called from I/O thread context */
 static void sink_input_detach(pa_sink_input *i) {
     struct userdata *u;
-    pa_log("Sink input detach : start");
     pa_sink_input_assert_ref(i);
     pa_assert_se(u = i->userdata);
     pa_assert(u->rtpoll_item);
 
     pa_rtpoll_item_free(u->rtpoll_item);
     u->rtpoll_item = NULL;
-    pa_log("Sink input detach : iwab rtpoll freed");
 }
 
 int pa__init(pa_module*m) {
@@ -377,7 +399,6 @@ int pa__init(pa_module*m) {
     pa_proplist_setf(data.proplist, "iwab.underrun", "%lums", 0UL);
     data.module = u->module;
     pa_sink_input_new_data_set_sample_spec(&data, &u->ss);
-    //data.flags = PA_SINK_INPUT_DONT_INHIBIT_AUTO_SUSPEND;
     pa_sink_input_new(&u->sink_input, u->module->core, &data);
     pa_sink_input_new_data_done(&data);
 
@@ -393,22 +414,24 @@ int pa__init(pa_module*m) {
     u->sink_input->detach = sink_input_detach;
     u->sink_input->kill = sink_input_kill_cb;
     u->sink_input->process_rewind = sink_input_process_rewind_cb;
+    u->sink_input->suspend_within_thread = sink_input_suspend_within_thread;
 
     // setup audio buffer
     pa_sink_input_get_silence(u->sink_input, &silence);
     u->queue = pa_memblockq_new(
             "module-iwab-input memblockq",
             0,
-            10*MAX_FRAME_SIZE,
-            5*MAX_FRAME_SIZE,
+            8*MAX_FRAME_SIZE,
+            4*MAX_FRAME_SIZE,
             &u->ss,
-            5*MAX_FRAME_SIZE,
+            4*MAX_FRAME_SIZE,
             0,
             0,
             &silence);
     pa_memblock_unref(silence.memblock);
 
     pa_sink_input_put(u->sink_input);
+    //pa_sink_input_cork(u->sink_input, true);
     pa_modargs_free(ma);
     return 0;
 
@@ -432,7 +455,6 @@ void pa__done(pa_module*m) {
     struct userdata *u;
 
     pa_assert(m);
-    pa_log("Sink input iwab done : start");
 
     if (!(u = m->userdata))
         return;
@@ -452,5 +474,4 @@ void pa__done(pa_module*m) {
     memset(u, 0, sizeof(struct userdata));
     pa_xfree(u);
     m->userdata = NULL;
-    pa_log("Sink input iwab done : userdata freed");
 }
