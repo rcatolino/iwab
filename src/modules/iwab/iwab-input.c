@@ -253,6 +253,9 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     if (u->seqnb != 0 && u->istream.iw_in->seq < u->seqnb) {
         pa_log("Packet disordered. Previous seq : %u, last seq : %u, rewind : %u",
             u->seqnb, u->istream.iw_in->seq, u->seqnb - u->istream.iw_in->seq);
+        // hum, maybe the source has restarted, let's reset the counters;
+        u->seqnb = 0;
+        u->last_pb_ts = 0;
         goto ignore;
     }
 
