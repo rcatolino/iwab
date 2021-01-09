@@ -58,7 +58,7 @@ struct ieee80211_head {
   uint8_t addr3[6];
   uint16_t frag_nb : 4;
   uint16_t seq_nb : 12;
-}__attribute__((packed));
+}__attribute__((packed)); // size 24
 
 struct ieee80211_qos {
   uint16_t priority : 3;
@@ -67,23 +67,22 @@ struct ieee80211_qos {
   uint16_t ack_policy : 2;
   uint16_t payload_type : 1;
   uint16_t txop_duration : 8;
-}__attribute__((packed));
+}__attribute__((packed)); // size 2
 
 struct iwab_head {
-  uint8_t version;
-  uint8_t channel;
-  uint16_t length;
-  uint32_t seq;
   uint64_t timestamp;
+  uint32_t seq;
+  uint16_t length;
+  uint8_t version;
   uint8_t retry;
-  uint8_t pad[7]; // align on 64bit boundary
-}__attribute__((packed));
+  uint8_t pad[6];
+}__attribute__((packed)); // size 16
 
 struct headers {
   struct ieee80211_head dot11;
   struct ieee80211_qos dot11qos;
   struct iwab_head iw_h;
-}__attribute__((packed));
+}__attribute__((packed)); // size 50
 
 struct iwab {
   int fd;

@@ -47,7 +47,7 @@ ssize_t iwab_read(struct iwab* iw, char* buffer, ssize_t max_length, size_t* dat
   }
 
   dot11_in = (struct ieee80211_head*) (buffer + *data_offset);
-  *data_offset += sizeof(struct ieee80211_head) + sizeof(uint16_t); // skip qos field as well
+  *data_offset += sizeof(struct ieee80211_head) + sizeof(struct ieee80211_qos); // skip qos field as well
   if (dot11_in->type != 2 || dot11_in->subtype != 8) {
     errno = EAGAIN; // too small or wrong type
     return -4;
@@ -123,7 +123,6 @@ static void iwab_setup(struct iwab* iw) {
 
   // Swag header
   iw->wi_h.iw_h.version = 0;
-  iw->wi_h.iw_h.channel = 0;
   iw->wi_h.iw_h.length = 0; // set channel size here for each packet
   iw->wi_h.iw_h.seq = 0; // increment by one for each new packet
   iw->wi_h.iw_h.timestamp = 0;
