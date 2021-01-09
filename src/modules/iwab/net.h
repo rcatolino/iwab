@@ -69,12 +69,6 @@ struct ieee80211_qos {
   uint16_t txop_duration : 8;
 }__attribute__((packed));
 
-struct l2_head {
-  uint8_t src_mac[6];
-  uint8_t dst_mac[6];
-  uint16_t ethertype;
-}__attribute__((packed));
-
 struct iwab_head {
   uint8_t version;
   uint8_t channel;
@@ -88,7 +82,6 @@ struct iwab_head {
 struct headers {
   struct ieee80211_head dot11;
   struct ieee80211_qos dot11qos;
-  struct l2_head l2;
   struct iwab_head iw_h;
 }__attribute__((packed));
 
@@ -98,7 +91,6 @@ struct iwab {
   // the buffer will be allocated by the user
   struct radiotap_head* rt_in;
   struct ieee80211_head* dot11_in;
-  struct l2_head* l2_in;
   struct iwab_head* iw_in;
   // the following struct are used when sending, allocation is static
   union {

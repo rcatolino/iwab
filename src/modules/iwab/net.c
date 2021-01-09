@@ -22,7 +22,6 @@ ssize_t iwab_read(struct iwab* iw, char* buffer, ssize_t max_length, size_t* dat
   ssize_t read_size;
   struct radiotap_head* rt_in = NULL;
   struct ieee80211_head* dot11_in = NULL;
-  struct l2_head* l2_in = NULL;
   struct iwab_head* iw_in = NULL;
   *data_offset = 0;
   if (!buffer) {
@@ -49,7 +48,7 @@ ssize_t iwab_read(struct iwab* iw, char* buffer, ssize_t max_length, size_t* dat
 
   dot11_in = (struct ieee80211_head*) (buffer + *data_offset);
   *data_offset += sizeof(struct ieee80211_head) + sizeof(uint16_t); // skip qos field as well
-  if ((read_size - *data_offset) <= sizeof(struct l2_head) || dot11_in->type != 2 || dot11_in->subtype != 8) {
+  if (dot11_in->type != 2 || dot11_in->subtype != 8) {
     errno = EAGAIN; // too small or wrong type
     return -4;
   }
@@ -61,9 +60,6 @@ ssize_t iwab_read(struct iwab* iw, char* buffer, ssize_t max_length, size_t* dat
     return -5;
   }
 
-  // TODO: why do we even have this layer ?
-  l2_in = (struct l2_head*) (buffer + *data_offset);
-  *data_offset += sizeof(struct l2_head);
   if (read_size - *data_offset <= sizeof(struct iwab_head)) {
     errno = EAGAIN;
     return -6;
@@ -78,7 +74,6 @@ ssize_t iwab_read(struct iwab* iw, char* buffer, ssize_t max_length, size_t* dat
 
   iw->rt_in = rt_in;
   iw->dot11_in = dot11_in;
-  iw->l2_in = l2_in;
   iw->iw_in = iw_in;
   return read_size - (*data_offset + 4); // 4 is for the FCS
 }
@@ -125,9 +120,6 @@ static void iwab_setup(struct iwab* iw) {
   iw->wi_h.dot11.seq_nb = 0;
   iw->wi_h.dot11qos.priority = 0;
   iw->wi_h.dot11qos.ack_policy = 0;
-  memset(iw->wi_h.l2.src_mac, 0, sizeof(iw->wi_h.l2.src_mac));
-  memset(iw->wi_h.l2.dst_mac, 0, sizeof(iw->wi_h.l2.dst_mac));
-  iw->wi_h.l2.ethertype = 0x8454;
 
   // Swag header
   iw->wi_h.iw_h.version = 0;
