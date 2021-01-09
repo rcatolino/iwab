@@ -83,12 +83,15 @@ struct userdata {
 /* Called from I/O thread context */
 static int sink_input_process_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *chunk) {
     struct userdata *u = PA_SINK_INPUT(o)->userdata;
+    pa_usec_t latency = 0;
 
     switch (code) {
         // TODO: add latency from sink
         case PA_SINK_INPUT_MESSAGE_GET_LATENCY:
-            *((pa_usec_t*) data) = pa_bytes_to_usec(pa_memblockq_get_length(u->queue),
+            latency = pa_bytes_to_usec(pa_memblockq_get_length(u->queue),
                     &u->sink_input->sample_spec);
+            *((pa_usec_t*) data) = latency;
+            pa_log_debug("Sink input get latenyc, returning : %lu", latency);
             break;
         case PA_SINK_INPUT_MESSAGE_SET_STATE:
             pa_log_debug("Sink input state changed : %d", u->sink_input->thread_info.state);
@@ -116,10 +119,12 @@ static int sink_input_pop_cb(pa_sink_input *i, size_t length, pa_memchunk *chunk
 
     if (pa_memblockq_peek(u->queue, chunk) < 0) {
         u->stats.underrun += pa_bytes_to_usec(length, &u->ss);
-        pa_log_debug("Warning, buffer underrun : %zd bytes requested but queue empty.",
+        pa_log("Warning, buffer underrun : %zd bytes requested but queue empty.",
                 length);
         if (u->stats.underrun > 500000 && u->sink_input->thread_info.state != PA_SINK_INPUT_CORKED) {
-            pa_log("Lots of underrun, corking sink input");
+            u->stats.underrun = 0;
+            pa_usec_t sink_delay = pa_sink_get_latency_within_thread(u->sink_input->sink, false);
+            pa_log("Lots of underrun, corking sink input. sink latency : %lu", sink_delay);
             pa_sink_input_set_state_within_thread(u->sink_input, PA_SINK_INPUT_CORKED);
         }
 
@@ -331,6 +336,13 @@ static void sink_input_attach(pa_sink_input *i) {
     pa_rtpoll_item_set_work_callback(u->rtpoll_item, rtpoll_work_cb, u);
 }
 
+void sink_input_update_max_request(pa_sink_input *i, size_t nbytes) {
+    struct userdata *u;
+    pa_sink_input_assert_ref(i);
+    pa_assert_se(u = i->userdata);
+    pa_log("New max request size : %zu", nbytes);
+}
+
 /* Called from I/O thread context */
 static void sink_input_detach(pa_sink_input *i) {
     struct userdata *u;
@@ -413,8 +425,10 @@ int pa__init(pa_module*m) {
     u->sink_input->attach = sink_input_attach;
     u->sink_input->detach = sink_input_detach;
     u->sink_input->kill = sink_input_kill_cb;
+    u->sink_input->update_max_request = sink_input_update_max_request;
     u->sink_input->process_rewind = sink_input_process_rewind_cb;
     u->sink_input->suspend_within_thread = sink_input_suspend_within_thread;
+    pa_sink_input_set_requested_latency(u->sink_input, pa_bytes_to_usec(MAX_FRAME_SIZE, &u->ss));
 
     // setup audio buffer
     pa_sink_input_get_silence(u->sink_input, &silence);
