@@ -60,6 +60,7 @@ PA_MODULE_USAGE(
 
 #define DEFAULT_SINK_NAME "iwabsink"
 #define DEFAULT_IFACE "mon0"
+#define MIN_FRAME_SIZE 1000
 #define MAX_FRAME_SIZE 1400
 
 struct userdata {
@@ -167,7 +168,6 @@ static void thread_func(void *userdata) {
 
     pa_thread_mq_install(&u->thread_mq);
     u->stream_ts_abs = pa_rtclock_now();
-    u->retries = 0;
 
     for (;;) {
         pa_usec_t now = 0;
@@ -185,9 +185,37 @@ static void thread_func(void *userdata) {
         if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
             if (now >= u->stream_ts_abs) { // is it time to render the next chunk already ?
                 pa_usec_t chunk_time = 0;
-                pa_sink_render(u->sink, u->sink->thread_info.max_request, &u->chunk);
-                u->retries = 0;
+                if (u->retries > 0) {
+                    // this buffer has already been sent, reset it.
+                    u->chunk.index = 0;
+                    u->chunk.length = MAX_FRAME_SIZE;
+                    u->retries = 0;
+                }
+
+                pa_sink_render_into(u->sink, &u->chunk);
                 pa_assert(u->chunk.length > 0);
+                if ((u->chunk.length + u->chunk.index) < MIN_FRAME_SIZE) {
+                    u->chunk.index += u->chunk.length;
+                    /*
+                    pa_log("Warning, rendered buffer is too small : %lu bytes. index : %lu. retrying",
+                            u->chunk.length, u->chunk.index);
+                    */
+                    u->chunk.length = MAX_FRAME_SIZE - u->chunk.index;
+                    continue;
+                } else if ((u->chunk.length + u->chunk.index)> MAX_FRAME_SIZE) {
+                    pa_log("WTF, rendered buffer length is too big : %lu bytes !",
+                            u->chunk.length);
+                    goto fail;
+                } else {
+                    // chunk is ready
+                    u->chunk.length += u->chunk.index;
+                    u->chunk.index = 0;
+                    /*
+                    pa_log("buffer is ready : %lu bytes @ %lu offset",
+                            u->chunk.length, u->chunk.index);
+                    */
+                }
+
                 chunk_time = pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec);
                 if (now >= u->stream_ts_abs + (chunk_time/2)) {
                     pa_log("Warning, late render. stream_ts: %lu, now : %lu, delay : %lu, rendering & sending %lu us.",
@@ -197,12 +225,12 @@ static void thread_func(void *userdata) {
 
                 p = pa_memblock_acquire(u->chunk.memblock);
                 ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->stream_ts_abs, u->retries);
+                pa_memblock_release(u->chunk.memblock);
                 if (ret < 0) {
                     pa_log("Error %d sending %zu byte buffer : %s", ret, u->chunk.length, pa_cstrerror(errno));
                     goto fail;
                 }
 
-                pa_memblock_release(u->chunk.memblock);
                 u->retries += 1;
                 u->stream_resend_abs = u->stream_ts_abs + chunk_time / 2;
                 u->stream_ts_abs += chunk_time;
@@ -215,13 +243,12 @@ static void thread_func(void *userdata) {
 
                 p = pa_memblock_acquire(u->chunk.memblock);
                 ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->istream.wi_h.iw_h.timestamp, u->retries);
+                pa_memblock_release(u->chunk.memblock);
                 if (ret < 0) {
                     pa_log("Error resending %zu byte buffer at %p", u->chunk.length, (char*) p + u->chunk.index);
                     goto fail;
                 }
 
-                pa_memblock_release(u->chunk.memblock);
-                pa_memblock_unref(u->chunk.memblock);
                 u->retries += 1;
                 pa_rtpoll_set_timer_absolute(u->rtpoll, u->stream_ts_abs);
             } else {
@@ -283,6 +310,9 @@ int pa__init(pa_module*m) {
     u->core = m->core;
     u->module = m;
     u->rtpoll = pa_rtpoll_new();
+    pa_memchunk_reset(&u->chunk);
+    u->chunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
+    u->retries = 1;
     if (pa_thread_mq_init(&u->thread_mq, m->core->mainloop, u->rtpoll) < 0) {
         pa_log("pa_thread_mq_init() failed.");
         goto fail;
@@ -393,6 +423,12 @@ void pa__done(pa_module*m) {
         pa_rtpoll_free(u->rtpoll);
 
     pa_assert_se(iwab_close(&u->istream) == 0);
+
+    if (u->chunk.memblock) {
+        pa_memblock_unref(u->chunk.memblock);
+    }
+
+    pa_memchunk_reset(&u->chunk);
 
     pa_xfree(u);
 }
