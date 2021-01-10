@@ -112,7 +112,7 @@ static int sink_process_msg(
             }
 
             *((int64_t*) data) = (int64_t) latency;
-            pa_log("Get latency : %ldus", latency);
+            pa_log("Get latency : %"PRId64"us", latency);
             return 0;
         }
     }
@@ -121,7 +121,8 @@ static int sink_process_msg(
 }
 
 /* Called from the IO thread. */
-static int sink_set_state_in_io_thread_cb(pa_sink *s, pa_sink_state_t new_state, pa_suspend_cause_t new_suspend_cause) {
+static int sink_set_state_in_io_thread_cb(pa_sink *s, pa_sink_state_t new_state,
+    pa_suspend_cause_t new_suspend_cause) {
     struct userdata *u;
 
     pa_assert(s);
@@ -148,17 +149,18 @@ static void sink_update_requested_latency_cb(pa_sink *s) {
     pa_assert_se(u = s->userdata);
 
     u->block_usec = pa_sink_get_requested_latency_within_thread(s);
-    pa_log("Update requested latency to %ld", u->block_usec); // TODO: this is wrong, block_usec is used to determine the frame size
+    // TODO: this is wrong, block_usec is used to determine the frame size
+    pa_log("Update requested latency to %"PRIu64"us", u->block_usec);
 
     if (u->block_usec == -1) {
         nbytes = pa_frame_align(MAX_FRAME_SIZE, &u->sink->sample_spec);
         u->block_usec = pa_bytes_to_usec(nbytes, &u->sink->sample_spec);
-        pa_log("Requested latency is invalid, using %lu instead", u->block_usec);
+        pa_log("Requested latency is invalid, using %"PRIu64"us instead", u->block_usec);
     } else {
         nbytes = pa_usec_to_bytes(u->block_usec, &u->sink->sample_spec);
     }
 
-    pa_log("Corresponding buffer size : %lu", nbytes);
+    pa_log("Corresponding buffer size : %zu", nbytes);
     pa_sink_set_max_rewind_within_thread(s, 0);
     pa_sink_set_max_request_within_thread(s, nbytes);
 }
@@ -199,30 +201,32 @@ static void thread_func(void *userdata) {
                 pa_sink_render_into(u->sink, &u->chunk);
                 if ((u->chunk.length + u->chunk.index) < MIN_FRAME_SIZE) {
                     u->chunk.index += u->chunk.length;
-                    pa_log("Warning, rendered buffer is too small : %lu bytes. index : %lu. retrying",
+                    pa_log("Warning, rendered buffer is too small : %zu bytes. index : %zu. retrying",
                             u->chunk.length, u->chunk.index);
                     u->chunk.length = MAX_FRAME_SIZE - u->chunk.index;
                     continue;
                 } else if ((u->chunk.length + u->chunk.index)> MAX_FRAME_SIZE) {
-                    pa_log("WTF, rendered buffer length is too big : %lu bytes !",
+                    pa_log("WTF, rendered buffer length is too big : %zu bytes !",
                             u->chunk.length);
                     goto fail;
                 } else {
                     // chunk is ready
                     u->chunk.length += u->chunk.index;
                     u->chunk.index = 0;
-                    pa_log("buffer is ready : %lu bytes @ %lu offset",
+                    pa_log("buffer is ready : %zd bytes @ %zd offset",
                             u->chunk.length, u->chunk.index);
                 }
 
                 chunk_time = pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec);
                 if (now >= u->stream_ts_abs + (chunk_time/2)) {
-                    pa_log("Warning, late render. stream_ts: %lu, now : %lu, delay : %lu, rendering & sending %lu us.",
+                    pa_log("Warning, late render. stream_ts: %"PRIu64\
+                        ", now : %"PRIu64", delay : %"PRIu64", rendering & sending %"PRIu64" us.",
                             u->stream_ts_abs, now, now - u->stream_ts_abs, chunk_time);
                     u->stream_ts_abs = now;
                 }
 
-                pa_log("stream_ts: %lu, now : %lu, diff : %lu, rendering & sending %lu us. (%lu bytes)",
+                pa_log("stream_ts: %"PRIu64", now : %"PRIu64", diff : %"PRIu64\
+                    ", rendering & sending %"PRIu64" us. (%zd bytes)",
                         u->stream_ts_abs, now, now-u->stream_ts_abs,
                         pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec),
                         u->chunk.length);
@@ -244,7 +248,8 @@ static void thread_func(void *userdata) {
                 u->stream_ts_abs += chunk_time;
                 pa_rtpoll_set_timer_absolute(u->rtpoll, u->stream_resend_abs);
             } else if (now >= u->stream_resend_abs && u->retries <= 1) {
-                pa_log("stream_resend_ts: %lu, now : %lu, diff: %lu, resending %lu us.",
+                pa_log("stream_resend_ts: %"PRIu64", now : %"PRIu64", diff: %"PRIu64\
+                    ", resending %"PRIu64" us.",
                         u->stream_resend_abs, now, now-u->stream_resend_abs,
                         pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec));
 
@@ -366,7 +371,7 @@ int pa__init(pa_module*m) {
     // We can send 1400 bytes frames max
     buffer_size = pa_frame_align(MAX_FRAME_SIZE, &u->sink->sample_spec);
     u->block_usec = pa_bytes_to_usec(buffer_size, &u->sink->sample_spec);
-    pa_log("Buffer size : %zd, corresponding timing : %luus at %s %uch %dHz",
+    pa_log("Buffer size : %zd, corresponding timing : %"PRIu64"us at %s %uch %dHz",
             buffer_size, u->block_usec,
             pa_sample_format_to_string(u->sink->sample_spec.format),
             u->sink->sample_spec.channels,
