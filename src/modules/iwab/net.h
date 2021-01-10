@@ -123,7 +123,7 @@ int iwab2_open(struct iwab2* iw, const char *iface, uint16_t port, uint8_t send)
 int iwab2_close(struct iwab2* iw);
 ssize_t iwab2_send(struct iwab2* iw, char* buffer, ssize_t length,
     uint64_t timestamp, uint8_t retried);
-ssize_t iwab2_recv(struct iwab2* iw, char* buffer, ssize_t max_length, size_t* data_offset);
+ssize_t iwab2_recv(struct iwab2* iw, char* buffer, ssize_t max_length);
 
 int iwab_open(struct iwab* iw, const char *iface);
 int iwab_close(struct iwab* iw);

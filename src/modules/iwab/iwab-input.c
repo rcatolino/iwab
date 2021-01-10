@@ -206,9 +206,10 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     newchunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
     for (;;) {
         p = pa_memblock_acquire(newchunk.memblock);
-        l = iwab2_recv(&u->istream, (char*) p, pa_memblock_get_length(newchunk.memblock),
-                &newchunk.index);
+        l = iwab2_recv(&u->istream, (char*) p, pa_memblock_get_length(newchunk.memblock));
+        // TODO: we should loop this to get all the datagrams that are ready
         pa_memblock_release(newchunk.memblock);
+        pa_log("new data ready, got %zd bytes", l);
 
         if (l < 0) {
             /*
@@ -236,11 +237,6 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
 
         newchunk.length = l;
         break;
-    }
-
-    if (u->sink_input->thread_info.state == PA_SINK_INPUT_CORKED) {
-        // We read a valid packet, but sink input is corked, let's start up again
-        pa_sink_input_set_state_within_thread(u->sink_input, PA_SINK_INPUT_RUNNING);
     }
 
     if (!PA_SINK_IS_OPENED(u->sink_input->sink->thread_info.state)) {
@@ -310,6 +306,11 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
 
     if (now >= u->stat_time + STAT_PERIOD) {
         update_stats(u, now);
+    }
+
+    if (u->sink_input->thread_info.state == PA_SINK_INPUT_CORKED) {
+        // We read a valid packet, but sink input is corked, let's start up again
+        pa_sink_input_set_state_within_thread(u->sink_input, PA_SINK_INPUT_RUNNING);
     }
 
     return 1;

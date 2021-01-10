@@ -2,7 +2,9 @@
 #include <arpa/inet.h>
 #include <endian.h>
 #include <errno.h>
+#include <ifaddrs.h>
 #include <net/if.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,7 +14,7 @@
 
 #include "net.h"
 
-ssize_t iwab2_recv(struct iwab2* iw, char* buffer, ssize_t max_length, size_t* data_offset) {
+ssize_t iwab2_recv(struct iwab2* iw, char* buffer, ssize_t max_length) {
   ssize_t read_size;
   if (!buffer) {
     errno = EINVAL;
@@ -37,7 +39,6 @@ ssize_t iwab2_recv(struct iwab2* iw, char* buffer, ssize_t max_length, size_t* d
     return 0;
   }
 
-  *data_offset = read_size - iw->iov[0].iov_len;
   return read_size - iw->iov[0].iov_len;
 }
 
@@ -132,10 +133,11 @@ int iwab2_open(struct iwab2* iw, const char* iface, uint16_t port, uint8_t send)
   iw->group_addr.sin6_family = AF_INET6;
   iw->group_addr.sin6_port = htobe16(port);
   iw->group_addr.sin6_addr = mc_req.ipv6mr_multiaddr;
+  iw->group_addr.sin6_scope_id = ifr.ifr_ifindex;
   if (send == 0) {
     if (bind(fd, (struct sockaddr *) &iw->group_addr, sizeof(iw->group_addr)) < 0) {
       printf("Error binding to multicast group %s:%d : %s\n", mcast_group_ip6, port, strerror(errno));
-      return -5;
+      return -7;
     }
   } else {
     if (connect(fd, (struct sockaddr *) &iw->group_addr, sizeof(iw->group_addr)) < 0) {
