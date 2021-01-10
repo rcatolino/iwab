@@ -91,7 +91,7 @@ static int sink_input_process_msg(pa_msgobject *o, int code, void *data, int64_t
             latency = pa_bytes_to_usec(pa_memblockq_get_length(u->queue),
                     &u->sink_input->sample_spec);
             *((pa_usec_t*) data) = latency;
-            pa_log_debug("Sink input get latenyc, returning : %lu", latency);
+            pa_log_debug("Sink input get latenyc, returning : %" PRIu64, latency);
             break;
         case PA_SINK_INPUT_MESSAGE_SET_STATE:
             pa_log_debug("Sink input state changed : %d", u->sink_input->thread_info.state);
@@ -124,7 +124,7 @@ static int sink_input_pop_cb(pa_sink_input *i, size_t length, pa_memchunk *chunk
         if (u->stats.underrun > 500000 && u->sink_input->thread_info.state != PA_SINK_INPUT_CORKED) {
             u->stats.underrun = 0;
             pa_usec_t sink_delay = pa_sink_get_latency_within_thread(u->sink_input->sink, false);
-            pa_log("Lots of underrun, corking sink input. sink latency : %lu", sink_delay);
+            pa_log("Lots of underrun, corking sink input. sink latency : %" PRIu64, sink_delay);
             pa_sink_input_set_state_within_thread(u->sink_input, PA_SINK_INPUT_CORKED);
         }
 
@@ -164,9 +164,12 @@ static void update_stats(struct userdata* u, pa_usec_t now) {
     pa_usec_t timediff = (now - u->stat_time) / 1000; // ms per period
     u->stat_time = now;
 
-    pa_proplist_setf(u->sink_input->proplist, "iwab.lost", "%lums/s", u->stats.lost / timediff);
-    pa_proplist_setf(u->sink_input->proplist, "iwab.underrun", "%lums/s", u->stats.underrun / timediff);
-    pa_proplist_setf(u->sink_input->proplist, "iwab.overrun", "%lums/s", u->stats.overrun / timediff);
+    pa_proplist_setf(u->sink_input->proplist, "iwab.lost", "%" PRIu64 "ms/s",
+        u->stats.lost / timediff);
+    pa_proplist_setf(u->sink_input->proplist, "iwab.underrun", "%" PRIu64 "lums/s",
+        u->stats.underrun / timediff);
+    pa_proplist_setf(u->sink_input->proplist, "iwab.overrun", "%" PRIu64 "ms/s",
+        u->stats.overrun / timediff);
     pa_proplist_setf(u->sink_input->proplist, "iwab.avg_queue_nblocks", "%u packets",
             u->stats.queue_nblocks / u->stats.count);
     u->stats.lost = 0;
@@ -260,7 +263,8 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     }
 
     if (u->last_pb_ts != 0 && u->istream.iw_in->timestamp < u->last_pb_ts) {
-        pa_log("Timestamps disordered. Previous ts : %lu, last ts : %lu, rewind : %lu",
+        pa_log("Timestamps disordered. Previous ts : %" PRIu64 \
+            ", last ts : %" PRIu64 ", rewind : %" PRIu64,
             u->last_pb_ts, u->istream.iw_in->timestamp,
             u->last_pb_ts - u->istream.iw_in->timestamp);
         goto ignore;
@@ -409,9 +413,9 @@ int pa__init(pa_module*m) {
     pa_proplist_sets(data.proplist, PA_PROP_MEDIA_ROLE, "stream");
     pa_proplist_setf(data.proplist, PA_PROP_MEDIA_NAME, "wiscast streaming from %s",
             u->iface);
-    pa_proplist_setf(data.proplist, "iwab.lost", "%lums", 0UL);
-    pa_proplist_setf(data.proplist, "iwab.overrun", "%lums", 0UL);
-    pa_proplist_setf(data.proplist, "iwab.underrun", "%lums", 0UL);
+    pa_proplist_setf(data.proplist, "iwab.lost", "%" PRIu64 "ms", (uint64_t) 0);
+    pa_proplist_setf(data.proplist, "iwab.overrun", "%" PRIu64 "ms", (uint64_t) 0);
+    pa_proplist_setf(data.proplist, "iwab.underrun", "%" PRIu64 "ms", (uint64_t) 0);
     data.module = u->module;
     pa_sink_input_new_data_set_sample_spec(&data, &u->ss);
     pa_sink_input_new(&u->sink_input, u->module->core, &data);
