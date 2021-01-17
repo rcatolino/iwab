@@ -213,8 +213,10 @@ static void thread_func(void *userdata) {
                     // chunk is ready
                     u->chunk.length += u->chunk.index;
                     u->chunk.index = 0;
+                    /*
                     pa_log("buffer is ready : %zd bytes @ %zd offset",
                             u->chunk.length, u->chunk.index);
+                    */
                 }
 
                 chunk_time = pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec);
@@ -225,41 +227,49 @@ static void thread_func(void *userdata) {
                     u->stream_ts_abs = now;
                 }
 
+                /*
                 pa_log("stream_ts: %"PRIu64", now : %"PRIu64", diff : %"PRIu64\
                     ", rendering & sending %"PRIu64" us. (%zd bytes)",
                         u->stream_ts_abs, now, now-u->stream_ts_abs,
                         pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec),
                         u->chunk.length);
+                */
                 p = pa_memblock_acquire(u->chunk.memblock);
                 pa_assert(memcmp(&u->pad, &padtest, 8) == 0);
                 ret = iwab2_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length,
                     u->stream_ts_abs, u->retries);
-                pa_log("sent %zd bytes\n", ret);
                 pa_assert(memcmp(&u->pad, &padtest, 8) == 0);
                 pa_memblock_release(u->chunk.memblock);
+                u->retries += 1;
                 if (ret < 0) {
-                    pa_log("Error %zd sending %zu byte buffer : %s",
-                        ret, u->chunk.length, pa_cstrerror(errno));
-                    goto fail;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        pa_log("Warning, cannot send packet %d: socket busy\n",
+                            u->istream.head.seq);
+                    } else {
+                      pa_log("Error %zd sending %zu byte buffer : %s",
+                          ret, u->chunk.length, pa_cstrerror(errno));
+                      goto fail;
+                    }
                 }
 
-                u->retries += 1;
                 u->stream_resend_abs = u->stream_ts_abs + chunk_time / 2;
                 u->stream_ts_abs += chunk_time;
                 pa_rtpoll_set_timer_absolute(u->rtpoll, u->stream_resend_abs);
             } else if (now >= u->stream_resend_abs && u->retries <= 1) {
+                /*
                 pa_log("stream_resend_ts: %"PRIu64", now : %"PRIu64", diff: %"PRIu64\
                     ", resending %"PRIu64" us.",
                         u->stream_resend_abs, now, now-u->stream_resend_abs,
                         pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec));
-
+                */
                 p = pa_memblock_acquire(u->chunk.memblock);
                 ret = iwab2_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length,
                     u->istream.head.timestamp, u->retries);
                 pa_memblock_release(u->chunk.memblock);
                 if (ret < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        continue;
+                        pa_log("Warning, cannot resend packet %d: socket busy\n",
+                            u->istream.head.seq);
                     } else {
                       pa_log("Error %zd resending %zu byte buffer : %s",
                           ret, u->chunk.length, pa_cstrerror(errno));
