@@ -59,9 +59,11 @@ PA_MODULE_USAGE(
         );
 
 #define DEFAULT_SINK_NAME "iwabsink"
-#define DEFAULT_IFACE "mon0"
+#define DEFAULT_IFACE "wlan0"
 #define MIN_FRAME_SIZE 1000
 #define MAX_FRAME_SIZE 1400
+
+static const char padtest[8] = {0x00};
 
 struct userdata {
     pa_core *core;
@@ -77,7 +79,8 @@ struct userdata {
     pa_usec_t stream_resend_abs; // time when to resend current packet
     const char *iface;
     int retries;
-    struct iwab istream;
+    struct iwab2 istream;
+    char pad[8];
     pa_memchunk chunk;
 };
 
@@ -171,7 +174,7 @@ static void thread_func(void *userdata) {
 
     for (;;) {
         pa_usec_t now = 0;
-        int ret;
+        ssize_t ret;
         char * p;
 
         if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
@@ -182,6 +185,7 @@ static void thread_func(void *userdata) {
             pa_sink_process_rewind(u->sink, 0);
         }
 
+        pa_assert(u->chunk.memblock);
         if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
             if (now >= u->stream_ts_abs) { // is it time to render the next chunk already ?
                 pa_usec_t chunk_time = 0;
@@ -193,13 +197,10 @@ static void thread_func(void *userdata) {
                 }
 
                 pa_sink_render_into(u->sink, &u->chunk);
-                pa_assert(u->chunk.length > 0);
                 if ((u->chunk.length + u->chunk.index) < MIN_FRAME_SIZE) {
                     u->chunk.index += u->chunk.length;
-                    /*
                     pa_log("Warning, rendered buffer is too small : %lu bytes. index : %lu. retrying",
                             u->chunk.length, u->chunk.index);
-                    */
                     u->chunk.length = MAX_FRAME_SIZE - u->chunk.index;
                     continue;
                 } else if ((u->chunk.length + u->chunk.index)> MAX_FRAME_SIZE) {
@@ -210,10 +211,8 @@ static void thread_func(void *userdata) {
                     // chunk is ready
                     u->chunk.length += u->chunk.index;
                     u->chunk.index = 0;
-                    /*
                     pa_log("buffer is ready : %lu bytes @ %lu offset",
                             u->chunk.length, u->chunk.index);
-                    */
                 }
 
                 chunk_time = pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec);
@@ -223,11 +222,20 @@ static void thread_func(void *userdata) {
                     u->stream_ts_abs = now;
                 }
 
+                pa_log("stream_ts: %lu, now : %lu, diff : %lu, rendering & sending %lu us. (%lu bytes)",
+                        u->stream_ts_abs, now, now-u->stream_ts_abs,
+                        pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec),
+                        u->chunk.length);
                 p = pa_memblock_acquire(u->chunk.memblock);
-                ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->stream_ts_abs, u->retries);
+                pa_assert(memcmp(&u->pad, &padtest, 8) == 0);
+                ret = iwab2_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length,
+                    u->stream_ts_abs, u->retries);
+                pa_log("sent %zd bytes\n", ret);
+                pa_assert(memcmp(&u->pad, &padtest, 8) == 0);
                 pa_memblock_release(u->chunk.memblock);
                 if (ret < 0) {
-                    pa_log("Error %d sending %zu byte buffer : %s", ret, u->chunk.length, pa_cstrerror(errno));
+                    pa_log("Error %zd sending %zu byte buffer : %s",
+                        ret, u->chunk.length, pa_cstrerror(errno));
                     goto fail;
                 }
 
@@ -236,17 +244,22 @@ static void thread_func(void *userdata) {
                 u->stream_ts_abs += chunk_time;
                 pa_rtpoll_set_timer_absolute(u->rtpoll, u->stream_resend_abs);
             } else if (now >= u->stream_resend_abs && u->retries <= 1) {
-                /*
-                pa_log("stream_resend_ts: %lu, now : %lu, now : %lu, rendering & sending %lu us.",
-                        u->stream_resend_abs, now, now-u->stream_resend_abs, pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec));
-                */
+                pa_log("stream_resend_ts: %lu, now : %lu, diff: %lu, resending %lu us.",
+                        u->stream_resend_abs, now, now-u->stream_resend_abs,
+                        pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec));
 
                 p = pa_memblock_acquire(u->chunk.memblock);
-                ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->istream.wi_h.iw_h.timestamp, u->retries);
+                ret = iwab2_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length,
+                    u->istream.head.timestamp, u->retries);
                 pa_memblock_release(u->chunk.memblock);
                 if (ret < 0) {
-                    pa_log("Error resending %zu byte buffer at %p", u->chunk.length, (char*) p + u->chunk.index);
-                    goto fail;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        continue;
+                    } else {
+                      pa_log("Error %zd resending %zu byte buffer : %s",
+                          ret, u->chunk.length, pa_cstrerror(errno));
+                      goto fail;
+                    }
                 }
 
                 u->retries += 1;
@@ -261,14 +274,14 @@ static void thread_func(void *userdata) {
 
         /* Hmm, nothing to do. Let's sleep */
         if ((ret = pa_rtpoll_run(u->rtpoll)) < 0) {
-            pa_log("rtpoll fail : %d", ret);
+            pa_log("rtpoll fail : %zd", ret);
             goto fail;
         }
 
         //pa_log("rtpoll run ok");
 
         if (ret == 0) {
-            pa_log("rtpoll 0, finishing thread: %d", ret);
+            pa_log("rtpoll 0, finishing thread: %zd", ret);
             goto finish;
         }
     }
@@ -312,6 +325,7 @@ int pa__init(pa_module*m) {
     u->rtpoll = pa_rtpoll_new();
     pa_memchunk_reset(&u->chunk);
     u->chunk.memblock = pa_memblock_new(u->core->mempool, MAX_FRAME_SIZE);
+    memset(&u->pad, 0, 8);
     u->retries = 1;
     if (pa_thread_mq_init(&u->thread_mq, m->core->mainloop, u->rtpoll) < 0) {
         pa_log("pa_thread_mq_init() failed.");
@@ -335,11 +349,12 @@ int pa__init(pa_module*m) {
     }
 
     u->iface = pa_modargs_get_value(ma, "iface", DEFAULT_IFACE);
-    if (iwab_open(&u->istream, u->iface)) {
+    if (iwab2_open(&u->istream, u->iface, 3890, true)) {
         pa_log("Failed to open interface %s, error : %s\n", u->iface, pa_cstrerror(errno));
         goto fail;
     }
 
+    pa_make_fd_nonblock(u->istream.fd);
     u->sink = pa_sink_new(m->core, &data, PA_SINK_LATENCY | PA_SINK_DYNAMIC_LATENCY);
     pa_sink_new_data_done(&data);
 
@@ -377,6 +392,7 @@ int pa__init(pa_module*m) {
     pa_log("RT Thread created !");
     pa_sink_put(u->sink);
     pa_log("Sink setup !");
+    pa_assert(memcmp(&u->pad, &padtest, 8) == 0);
     pa_modargs_free(ma);
     return 0;
 
@@ -422,7 +438,7 @@ void pa__done(pa_module*m) {
     if (u->rtpoll)
         pa_rtpoll_free(u->rtpoll);
 
-    pa_assert_se(iwab_close(&u->istream) == 0);
+    pa_assert_se(iwab2_close(&u->istream) == 0);
 
     if (u->chunk.memblock) {
         pa_memblock_unref(u->chunk.memblock);

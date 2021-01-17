@@ -1,8 +1,12 @@
 #ifndef _NET_H_
 #define _NET_H_
 
+#include <netinet/in.h>
 #include <stdint.h>
 #include <sys/uio.h>
+#include <sys/socket.h>
+
+static const char mcast_group_ip6[] = "FF02::10B";
 
 enum radiotap_flags {
   RADIOTAP_TSFT = 1 << 0,
@@ -103,6 +107,23 @@ struct iwab {
   struct iovec iov[3]; //Fixed headers, body
   uint8_t addr_filter[6];
 };
+
+struct iwab2 {
+  int fd;
+  union {
+    struct iwab_head head;
+    uint8_t h_buff[sizeof(struct iwab_head)];
+  };
+  struct sockaddr_in6 group_addr;
+  struct iovec iov[2]; //headers, body
+  uint8_t send;
+};
+
+int iwab2_open(struct iwab2* iw, const char *iface, uint16_t port, uint8_t send);
+int iwab2_close(struct iwab2* iw);
+ssize_t iwab2_send(struct iwab2* iw, char* buffer, ssize_t length,
+    uint64_t timestamp, uint8_t retried);
+ssize_t iwab2_recv(struct iwab2* iw, char* buffer, ssize_t max_length, size_t* data_offset);
 
 int iwab_open(struct iwab* iw, const char *iface);
 int iwab_close(struct iwab* iw);
