@@ -227,26 +227,27 @@ static void thread_func(void *userdata) {
                 ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->stream_ts_abs, u->retries);
                 pa_memblock_release(u->chunk.memblock);
                 if (ret < 0) {
-                    pa_log("Error %d sending %zu byte buffer : %s", ret, u->chunk.length, pa_cstrerror(errno));
-                    goto fail;
+                    pa_log("Error %d sending %zu byte buffer : %s", ret, u->chunk.length,
+                            pa_cstrerror(errno));
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        goto fail;
+                    }
                 }
 
                 u->retries += 1;
                 u->stream_resend_abs = u->stream_ts_abs + chunk_time / 2;
                 u->stream_ts_abs += chunk_time;
                 pa_rtpoll_set_timer_absolute(u->rtpoll, u->stream_resend_abs);
+                //pa_rtpoll_set_timer_absolute(u->rtpoll, u->stream_ts_abs);
             } else if (now >= u->stream_resend_abs && u->retries <= 1) {
-                /*
-                pa_log("stream_resend_ts: %lu, now : %lu, now : %lu, rendering & sending %lu us.",
-                        u->stream_resend_abs, now, now-u->stream_resend_abs, pa_bytes_to_usec(u->chunk.length, &u->sink->sample_spec));
-                */
-
                 p = pa_memblock_acquire(u->chunk.memblock);
-                ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->istream.wi_h.iw_h.timestamp, u->retries);
+                ret = iwab_send(&u->istream, (char*) p + u->chunk.index, u->chunk.length, u->istream.iw_h.timestamp, u->retries);
                 pa_memblock_release(u->chunk.memblock);
                 if (ret < 0) {
                     pa_log("Error resending %zu byte buffer at %p", u->chunk.length, (char*) p + u->chunk.index);
-                    goto fail;
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        goto fail;
+                    }
                 }
 
                 u->retries += 1;
@@ -340,6 +341,7 @@ int pa__init(pa_module*m) {
         goto fail;
     }
 
+    pa_make_fd_nonblock(u->istream.fd);
     u->sink = pa_sink_new(m->core, &data, PA_SINK_LATENCY | PA_SINK_DYNAMIC_LATENCY);
     pa_sink_new_data_done(&data);
 

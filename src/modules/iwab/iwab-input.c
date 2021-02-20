@@ -247,33 +247,33 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
         return 0;
     }
 
-    if (u->istream.iw_in->seq == u->seqnb) {
+    if (u->istream.iw_h.seq == u->seqnb) {
         // this is a repeat packet
         goto ignore;
     }
 
     pa_assert(pa_frame_aligned(newchunk.length, &u->ss));
-    if (u->seqnb != 0 && u->istream.iw_in->seq < u->seqnb) {
+    if (u->seqnb != 0 && u->istream.iw_h.seq < u->seqnb) {
         pa_log("Packet disordered. Previous seq : %u, last seq : %u, rewind : %u",
-            u->seqnb, u->istream.iw_in->seq, u->seqnb - u->istream.iw_in->seq);
+            u->seqnb, u->istream.iw_h.seq, u->seqnb - u->istream.iw_h.seq);
         // hum, maybe the source has restarted, let's reset the counters;
         u->seqnb = 0;
         u->last_pb_ts = 0;
         goto ignore;
     }
 
-    if (u->last_pb_ts != 0 && u->istream.iw_in->timestamp < u->last_pb_ts) {
+    if (u->last_pb_ts != 0 && u->istream.iw_h.timestamp < u->last_pb_ts) {
         pa_log("Timestamps disordered. Previous ts : %" PRIu64 \
             ", last ts : %" PRIu64 ", rewind : %" PRIu64,
-            u->last_pb_ts, u->istream.iw_in->timestamp,
-            u->last_pb_ts - u->istream.iw_in->timestamp);
+            u->last_pb_ts, u->istream.iw_h.timestamp,
+            u->last_pb_ts - u->istream.iw_h.timestamp);
         goto ignore;
     }
 
-    if (u->seqnb != 0 && u->istream.iw_in->seq != (u->seqnb + 1)) {
-        u->stats.lost += u->istream.iw_in->timestamp - u->last_pb_ts;
-        pa_assert(u->istream.iw_in->timestamp > u->last_pb_ts);
-        pa_usec_t missing = pa_usec_to_bytes(u->istream.iw_in->timestamp - u->last_pb_ts, &u->ss);
+    if (u->seqnb != 0 && u->istream.iw_h.seq != (u->seqnb + 1)) {
+        u->stats.lost += u->istream.iw_h.timestamp - u->last_pb_ts;
+        pa_assert(u->istream.iw_h.timestamp > u->last_pb_ts);
+        pa_usec_t missing = pa_usec_to_bytes(u->istream.iw_h.timestamp - u->last_pb_ts, &u->ss);
         pa_memchunk filler = newchunk;
         while (missing > 0) {
             if (newchunk.length > missing) {
@@ -285,7 +285,7 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
             /*
             pa_log("Packet lost or disordered. Previous seq : %u, last seq : %u. \
                     Missing %luus of playback, duplicating this chunk of length %luus",
-                u->seqnb, u->istream.iw_in->seq,
+                u->seqnb, u->istream.iw_h.seq,
                 pa_bytes_to_usec(missing, &u->ss),
                 pa_bytes_to_usec(filler.length, &u->ss));
             */
@@ -304,8 +304,8 @@ static int rtpoll_work_cb(pa_rtpoll_item *i) {
     u->stats.count += 1;
     u->stats.queue_nblocks += pa_memblockq_get_nblocks(u->queue);
 
-    u->seqnb = u->istream.iw_in->seq;
-    u->last_pb_ts = u->istream.iw_in->timestamp + pa_bytes_to_usec(newchunk.length, &u->ss);
+    u->seqnb = u->istream.iw_h.seq;
+    u->last_pb_ts = u->istream.iw_h.timestamp + pa_bytes_to_usec(newchunk.length, &u->ss);
     pa_memblock_unref(newchunk.memblock);
 
     if (now >= u->stat_time + STAT_PERIOD) {
